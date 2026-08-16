@@ -4,18 +4,18 @@
 
 | Folder | Purpose |
 |---|---|
-| `src/agent_core/cli/` | Inbound adapter — terminal interaction |
-| `src/agent_core/api/` | Inbound adapter — HTTP interaction |
-| `src/agent_core/core/` | All agent intelligence |
-| `src/agent_core/core/exceptions/` | Full exception hierarchy rooted at `AgentError` |
-| `src/agent_core/core/factories/` | Factories that construct registered instances from configuration |
-| `src/agent_core/core/models/` | All Pydantic data models: domain models and startup config |
-| `src/agent_core/core/protocols/` | Protocol interfaces for anything with interchangeable implementations |
-| `src/agent_core/core/registries/` | Runtime registries for agents, LLMs, and tools |
-| `src/agent_core/core/services/` | Use-case orchestration |
-| `src/agent_core/core/strategies/` | Reasoning and selection algorithm implementations |
-| `src/agent_core/core/tools/` | Concrete tool implementations |
-| `src/agent_core/adapters/` | Outbound adapters — the clients that talk to external systems |
+| `src/agent/cli/` | Inbound adapter — terminal interaction |
+| `src/agent/api/` | Inbound adapter — HTTP interaction |
+| `src/agent/core/` | All agent intelligence |
+| `src/agent/core/exceptions/` | Full exception hierarchy rooted at `AgentError` |
+| `src/agent/core/factories/` | Factories that construct registered instances from configuration |
+| `src/agent/core/models/` | All Pydantic data models: domain models and startup config |
+| `src/agent/core/protocols/` | Protocol interfaces for anything with interchangeable implementations |
+| `src/agent/core/registries/` | Runtime registries for agents, LLMs, and tools |
+| `src/agent/core/services/` | Use-case orchestration |
+| `src/agent/core/strategies/` | Reasoning and selection algorithm implementations |
+| `src/agent/core/tools/` | Concrete tool implementations |
+| `src/agent/adapters/` | Outbound adapters — the clients that talk to external systems |
 | `tests/unit/` | Pure logic tests — no external deps |
 | `tests/integration/` | Adapter wiring tests — all externals mocked |
 | `tests/e2e/` | Real-runtime smoke tests — never in CI |
@@ -102,7 +102,7 @@ All exceptions are subclasses of `AgentError`. `core/` raises only `AgentError` 
 | `XStrategy` | Interchangeable algorithm implementations in `core/strategies/` |
 | `XService` | Orchestration and use-case logic in `core/services/` |
 | `XRegistry` | Runtime name-to-instance maps in `core/registries/` |
-| `XFactory` | Object construction from config in `core/factories/` |
+| `XFactory` | Object construction from config in `core/factories/`, when a class earns its keep (state, multiple methods). A single construction step is a plain function instead. |
 | `XAdapter` | Concrete outbound adapter for an external system in `adapters/` |
 | `XConfig` | Pydantic config model in `core/models/` |
 | `XError` | Typed exception in `core/exceptions/` |

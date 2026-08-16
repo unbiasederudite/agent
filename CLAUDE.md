@@ -26,7 +26,7 @@ Single test: `uv run pytest tests/unit/path/to/test_file.py::test_name -q`
 
 ## Testing
 
-Tests mirror `src/agent_core/` 1:1 across three tiers, auto-marked by folder (root `conftest.py`) so `pytest -m "not e2e"` filters across all of them:
+Tests mirror `src/agent/` 1:1 across three tiers, auto-marked by folder (root `conftest.py`) so `pytest -m "not e2e"` filters across all of them:
 
 - `tests/unit/` — pure logic, no network/filesystem/subprocess/mocking
 - `tests/integration/` — adapter wiring, all externals mocked

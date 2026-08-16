@@ -16,7 +16,8 @@
     "ponytail@ponytail": true,
     "superpowers@superpowers-marketplace": true,
     "pydantic@pydantic-skills": true,
-    "astral@astral-sh": true
+    "astral@astral-sh": true,
+    "context7@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "ponytail": {
@@ -41,6 +42,12 @@
       "source": {
         "source": "github",
         "repo": "astral-sh/claude-code-plugins"
+      }
+    },
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
       }
     }
   }
