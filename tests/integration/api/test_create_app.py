@@ -1,4 +1,7 @@
-"""Hermetic e2e wiring test for create_app(): build_llm_registry -> CompletionService -> route."""
+"""Hermetic wiring tests for create_app(): build_registries -> CompletionService -> route.
+
+Covers both the model-only request path and the agent-only request path.
+"""
 
 import json
 from pathlib import Path
@@ -38,3 +41,43 @@ def test_create_app_given_valid_config_serves_chat_completion(
     assert body["model"] == "openai/gpt-4o"
     assert body["choices"][0]["message"]["content"] == "hello!"
     assert body["usage"]["total_tokens"] == 15
+
+
+def test_create_app_given_agent_only_serves_chat_completion_with_prepended_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "agents": [
+                    {
+                        "name": "researcher",
+                        "system_prompt": "You are a research assistant.",
+                        "default_llm": "openai/gpt-4o",
+                    }
+                ],
+            }
+        )
+    )
+
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"agent": "researcher", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "openai/gpt-4o"
+
+    _, kwargs = mock_acompletion.call_args
+    assert kwargs["messages"][0] == {
+        "role": "system",
+        "content": "You are a research assistant.",
+    }

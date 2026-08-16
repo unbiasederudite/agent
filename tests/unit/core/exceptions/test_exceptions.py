@@ -1,11 +1,16 @@
 from agent.core.exceptions import (
     AgentError,
+    AgentNotFoundError,
     ConfigError,
     LLMError,
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
 )
+
+
+def test_agent_not_found_error_is_agent_error():
+    assert issubclass(AgentNotFoundError, AgentError)
 
 
 def test_config_error_is_agent_error():

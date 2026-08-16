@@ -8,4 +8,4 @@ Pydantic data models.
 - `usage.py` — `Usage`, token counts for one completion
 - `completion.py` — `Completion`, the result of an `ILLM.complete()` call
 - `run.py` — `Run`, the domain record of one completion execution
-- `config.py` — `LLMConfig`, `LoggingConfig`, `AppConfig`: the startup config models, loaded once from JSON
+- `config.py` — `SamplingDefaults` (shared temperature/top_p/max_tokens fields), `LLMConfig`, `AgentConfig`, `LoggingConfig`, `AppConfig`: the startup config models, loaded once from JSON

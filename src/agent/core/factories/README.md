@@ -4,4 +4,4 @@ Construct registered instances from startup configuration. Wiring happens once p
 
 ## Contents
 
-- `app.py` — `build_llm_registry()`, builds an `LLMRegistry` from an `AppConfig` JSON file
+- `app.py` — `build_registries()`, builds an `LLMRegistry` and `AgentRegistry` from an `AppConfig` JSON file, cross-validating that every agent's `default_llm` is a declared LLM

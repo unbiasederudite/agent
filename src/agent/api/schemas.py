@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ChatMessage(BaseModel):
@@ -17,13 +17,33 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Request body for POST /v1/chat/completions."""
 
-    model: str = Field(
+    agent: str | None = Field(
+        default=None, description="Name of a registered agent to route this request through."
+    )
+    model: str | None = Field(
+        default=None,
         description=(
-            "litellm-format provider/model string to route this request to; "
-            "must be declared in the server's config."
-        )
+            "litellm-format provider/model string to route this request to; must be "
+            "declared in the server's config. Defaults to the selected agent's "
+            "default_llm if omitted."
+        ),
     )
     messages: list[ChatMessage] = Field(description="The conversation history to send.")
+    temperature: float | None = Field(
+        default=None, description="Overrides the agent's/LLM's configured default, if set."
+    )
+    top_p: float | None = Field(
+        default=None, description="Overrides the agent's/LLM's configured default, if set."
+    )
+    max_tokens: int | None = Field(
+        default=None, description="Overrides the agent's/LLM's configured default, if set."
+    )
+
+    @model_validator(mode="after")
+    def _require_agent_or_model(self) -> "ChatCompletionRequest":
+        if self.agent is None and self.model is None:
+            raise ValueError("either `agent` or `model` must be given")
+        return self
 
 
 class ChatCompletionChoice(BaseModel):
@@ -53,3 +73,22 @@ class ChatCompletionResponse(BaseModel):
     model: str = Field(description="The model that generated this completion.")
     choices: list[ChatCompletionChoice] = Field(description="The generated completion choices.")
     usage: ChatCompletionUsage = Field(description="Token usage for this request.")
+
+
+class ErrorDetail(BaseModel):
+    """OpenAI-compatible error detail."""
+
+    message: str = Field(description="A human-readable error message.")
+    type: str = Field(description='The error category, e.g. "invalid_request_error".')
+    param: str | None = Field(
+        default=None, description="The request field that caused the error, if any."
+    )
+    code: str | None = Field(
+        default=None, description="A short machine-readable error code, if any."
+    )
+
+
+class ErrorResponse(BaseModel):
+    """OpenAI-compatible error envelope for POST /v1/chat/completions."""
+
+    error: ErrorDetail = Field(description="The error details.")

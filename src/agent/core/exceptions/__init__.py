@@ -13,6 +13,10 @@ class LLMNotFoundError(AgentError):
     """Raised when a requested LLM name is not registered."""
 
 
+class AgentNotFoundError(AgentError):
+    """Raised when a requested agent name is not registered."""
+
+
 class LLMError(AgentError):
     """Raised when an outbound LLM call fails."""
 

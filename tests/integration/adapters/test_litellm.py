@@ -109,3 +109,59 @@ async def test_complete_given_status_code_408_raises_llm_timeout_error(
 
     with pytest.raises(LLMTimeoutError):
         await adapter.complete([Message(role="user", content="hi")])
+
+
+async def test_complete_given_no_params_and_no_defaults_omits_sampling_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    _, kwargs = mock_acompletion.call_args
+    assert "temperature" not in kwargs
+    assert "top_p" not in kwargs
+    assert "max_tokens" not in kwargs
+
+
+async def test_complete_given_constructed_defaults_forwards_them(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", temperature=0.2, top_p=0.9, max_tokens=512)
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    _, kwargs = mock_acompletion.call_args
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["top_p"] == 0.9
+    assert kwargs["max_tokens"] == 512
+
+
+async def test_complete_given_call_value_overrides_constructed_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", temperature=0.2)
+
+    await adapter.complete([Message(role="user", content="hi")], temperature=0.9)
+
+    _, kwargs = mock_acompletion.call_args
+    assert kwargs["temperature"] == 0.9
+
+
+async def test_complete_given_call_value_zero_overrides_constructed_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", temperature=0.5)
+
+    await adapter.complete([Message(role="user", content="hi")], temperature=0.0)
+
+    _, kwargs = mock_acompletion.call_args
+    assert kwargs["temperature"] == 0.0

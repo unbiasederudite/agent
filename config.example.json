@@ -7,6 +7,13 @@
       "model": "openai/gpt-4o"
     }
   ],
+  "agents": [
+    {
+      "name": "researcher",
+      "system_prompt": "You are a careful, concise research assistant.",
+      "default_llm": "anthropic/claude-3-5-haiku-20241022"
+    }
+  ],
   "logging": {
     "level": "INFO"
   }
