@@ -8,8 +8,10 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.141.1",
     "litellm>=1.96.2",
     "pydantic>=2.13.4",
+    "uvicorn>=0.52.3",
 ]
 
 [dependency-groups]
@@ -17,8 +19,9 @@ dev = [
     "ruff>=0.16.3",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
-    "pytest-mock>=3.15.1",
     "pre-commit>=4.6.2",
+    "pytest-asyncio>=1.4.0",
+    "httpx2>=2.10.0",
 ]
 
 [build-system]
@@ -28,6 +31,7 @@ build-backend = "uv_build"
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "D", "PT"]
@@ -43,6 +47,10 @@ python_version = "3.13"
 strict = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = "litellm.*"
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_forbid_extra = true
 init_typed = true
@@ -51,8 +59,4 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
-markers = [
-    "unit",
-    "integration",
-    "e2e",
-]
+asyncio_mode = "auto"
