@@ -4,4 +4,4 @@ The full exception hierarchy, rooted at `AgentError`. `core/` raises only `Agent
 
 ## Contents
 
-- `__init__.py` — `AgentError` (the root), `ConfigError`, `LLMNotFoundError`, `AgentNotFoundError`, `LLMError` (with `LLMRateLimitedError`, `LLMTimeoutError`)
+- `__init__.py` — `AgentError` (the root), `ConfigError`, `LLMNotFoundError`, `AgentNotFoundError`, `ToolNotFoundError`, `LLMError` (with `LLMRateLimitedError`, `LLMTimeoutError`)

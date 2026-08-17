@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from agent.core.models.config import AgentConfig, AppConfig, LLMConfig, LoggingConfig
+from agent.core.models.config import AgentConfig, AppConfig, LLMConfig, LoggingConfig, ToolConfig
 
 
 def test_llm_config_given_model_string_constructs():
@@ -109,3 +109,46 @@ def test_app_config_given_agents_constructs():
 
     assert config.agents[0].name == "researcher"
     assert config.agents[0].default_llm == "openai/gpt-4o"
+
+
+def test_tool_config_given_name_constructs():
+    config = ToolConfig(name="get_current_time")
+
+    assert config.name == "get_current_time"
+
+
+def test_agent_config_given_no_tools_defaults_to_empty_list():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        default_llm="openai/gpt-4o",
+    )
+
+    assert config.tools == []
+
+
+def test_agent_config_given_tools_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        default_llm="openai/gpt-4o",
+        tools=["get_current_time"],
+    )
+
+    assert config.tools == ["get_current_time"]
+
+
+def test_app_config_given_no_tools_defaults_to_empty_list():
+    raw = '{"llms": [{"model": "openai/gpt-4o"}]}'
+
+    config = AppConfig.model_validate_json(raw)
+
+    assert config.tools == []
+
+
+def test_app_config_given_tools_constructs():
+    raw = '{"llms": [{"model": "openai/gpt-4o"}], "tools": [{"name": "get_current_time"}]}'
+
+    config = AppConfig.model_validate_json(raw)
+
+    assert config.tools[0].name == "get_current_time"

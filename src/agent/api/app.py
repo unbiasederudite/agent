@@ -15,6 +15,8 @@ from agent.api.schemas import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatToolCall,
+    ChatToolCallFunction,
     ErrorDetail,
     ErrorResponse,
 )
@@ -25,6 +27,7 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    ToolNotFoundError,
 )
 from agent.core.factories.app import build_registries
 from agent.core.models.message import Message
@@ -86,6 +89,8 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
 
     @app.post("/v1/chat/completions")
     async def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResponse:
+        # tool_calls is never forwarded here -- ChatCompletionRequest._reject_inbound_tool_calls
+        # already guarantees no message in request.messages carries one.
         messages = [Message(role=m.role, content=m.content) for m in request.messages]
         try:
             run = await completion_service.run(
@@ -94,7 +99,8 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
                 model=request.model,
                 temperature=request.temperature,
                 top_p=request.top_p,
-                max_tokens=request.max_tokens,
+                max_tokens=request.max_completion_tokens,
+                tools=request.tools,
             )
         except AgentNotFoundError as exc:
             raise HTTPException(
@@ -103,6 +109,10 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
         except LLMNotFoundError as exc:
             raise HTTPException(
                 status_code=404, detail={"message": str(exc), "code": "model_not_found"}
+            ) from exc
+        except ToolNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail={"message": str(exc), "code": "tool_not_found"}
             ) from exc
         except LLMRateLimitedError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -113,6 +123,19 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
         except AgentError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+        tool_calls = (
+            [
+                ChatToolCall(
+                    id=tc.id,
+                    function=ChatToolCallFunction(
+                        name=tc.function.name, arguments=tc.function.arguments
+                    ),
+                )
+                for tc in run.response.tool_calls
+            ]
+            if run.response.tool_calls
+            else None
+        )
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex}",
             created=int(time.time()),
@@ -120,7 +143,9 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(role=run.response.role, content=run.response.content),
+                    message=ChatMessage(
+                        role=run.response.role, content=run.response.content, tool_calls=tool_calls
+                    ),
                     finish_reason=run.finish_reason,
                 )
             ],
@@ -134,8 +159,8 @@ def add_chat_completions_route(app: FastAPI, completion_service: CompletionServi
 
 def create_app(config_path: Path) -> FastAPI:
     """Build the FastAPI app, wired from the AppConfig JSON at `config_path`."""
-    llm_registry, agent_registry = build_registries(config_path)
-    completion_service = CompletionService(llm_registry, agent_registry)
+    llm_registry, agent_registry, tool_registry = build_registries(config_path)
+    completion_service = CompletionService(llm_registry, agent_registry, tool_registry)
 
     app = FastAPI()
     add_chat_completions_route(app, completion_service)

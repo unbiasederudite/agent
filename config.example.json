@@ -7,11 +7,19 @@
       "model": "openai/gpt-4o"
     }
   ],
+  "tools": [
+    {
+      "name": "get_current_time"
+    }
+  ],
   "agents": [
     {
       "name": "researcher",
       "system_prompt": "You are a careful, concise research assistant.",
-      "default_llm": "anthropic/claude-3-5-haiku-20241022"
+      "default_llm": "anthropic/claude-3-5-haiku-20241022",
+      "tools": [
+        "get_current_time"
+      ]
     }
   ],
   "logging": {

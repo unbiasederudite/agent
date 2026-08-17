@@ -5,13 +5,39 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class ChatToolCallFunction(BaseModel):
+    """The function half of an OpenAI-compatible tool call."""
+
+    name: str = Field(description="Name of the tool to invoke.")
+    arguments: str = Field(description="Raw JSON string of arguments, unparsed.")
+
+
+class ChatToolCall(BaseModel):
+    """An OpenAI-compatible tool call, as seen over the wire."""
+
+    id: str = Field(description="Unique identifier for this tool call.")
+    type: Literal["function"] = Field(default="function", description="The tool call type.")
+    function: ChatToolCallFunction = Field(description="The function to invoke.")
+
+
 class ChatMessage(BaseModel):
     """An OpenAI-compatible chat message, as seen over the wire."""
 
     role: Literal["system", "user", "assistant"] = Field(
         description="The message's role in the conversation."
     )
-    content: str = Field(description="The message's text content.")
+    content: str | None = Field(
+        default=None, description="The message's text content. `None` when `tool_calls` is set."
+    )
+    tool_calls: list[ChatToolCall] | None = Field(
+        default=None, description="Tool calls the assistant wants invoked, if any."
+    )
+
+    @model_validator(mode="after")
+    def _require_content_or_tool_calls(self) -> "ChatMessage":
+        if self.content is None and not self.tool_calls:
+            raise ValueError("either `content` or `tool_calls` must be given")
+        return self
 
 
 class ChatCompletionRequest(BaseModel):
@@ -28,21 +54,47 @@ class ChatCompletionRequest(BaseModel):
             "default_llm if omitted."
         ),
     )
-    messages: list[ChatMessage] = Field(description="The conversation history to send.")
+    messages: list[ChatMessage] = Field(
+        description=(
+            "The conversation history to send. `tool_calls` on a message is response-only "
+            'and rejected here -- this milestone has no `role: "tool"`/`tool_call_id` '
+            "support, so a replayed assistant tool-call turn can't be completed and would "
+            "only be rejected by the provider instead."
+        )
+    )
     temperature: float | None = Field(
         default=None, description="Overrides the agent's/LLM's configured default, if set."
     )
     top_p: float | None = Field(
         default=None, description="Overrides the agent's/LLM's configured default, if set."
     )
-    max_tokens: int | None = Field(
-        default=None, description="Overrides the agent's/LLM's configured default, if set."
+    max_completion_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Overrides the agent's/LLM's configured default, if set. Named to match OpenAI's "
+            "current field -- the older `max_tokens` is deprecated upstream and not accepted "
+            "here."
+        ),
+    )
+    tools: list[str] | None = Field(
+        default=None,
+        description=(
+            "Registered tool names to offer the LLM. Omitted/null uses the selected "
+            "agent's configured tools (or none); an empty list suppresses tools even if "
+            "the agent has some; a non-empty list is used as-is, ignoring the agent's own."
+        ),
     )
 
     @model_validator(mode="after")
     def _require_agent_or_model(self) -> "ChatCompletionRequest":
         if self.agent is None and self.model is None:
             raise ValueError("either `agent` or `model` must be given")
+        return self
+
+    @model_validator(mode="after")
+    def _reject_inbound_tool_calls(self) -> "ChatCompletionRequest":
+        if any(m.tool_calls for m in self.messages):
+            raise ValueError("`tool_calls` on a request message is not supported")
         return self
 
 

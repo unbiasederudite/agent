@@ -6,6 +6,7 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    ToolNotFoundError,
 )
 
 
@@ -31,3 +32,7 @@ def test_llm_rate_limited_error_is_llm_error():
 
 def test_llm_timeout_error_is_llm_error():
     assert issubclass(LLMTimeoutError, LLMError)
+
+
+def test_tool_not_found_error_is_agent_error():
+    assert issubclass(ToolNotFoundError, AgentError)

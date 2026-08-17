@@ -1,4 +1,4 @@
-"""Generic name-to-instance registry base, shared by LLMRegistry and AgentRegistry."""
+"""Generic name-to-instance registry base, shared by LLMRegistry, AgentRegistry, ToolRegistry."""
 
 from collections.abc import Callable
 

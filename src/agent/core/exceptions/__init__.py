@@ -17,6 +17,10 @@ class AgentNotFoundError(AgentError):
     """Raised when a requested agent name is not registered."""
 
 
+class ToolNotFoundError(AgentError):
+    """Raised when a requested tool name is not registered."""
+
+
 class LLMError(AgentError):
     """Raised when an outbound LLM call fails."""
 

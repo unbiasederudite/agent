@@ -75,7 +75,7 @@ Registries and factories are the binding layer between config and runtime.
 
 ## Wire Format
 
-The internal wire format for LLM messages and tool-calling is OpenAI-compatible. Any LLM adapter that speaks the OpenAI format drops in without touching `core/`, and `api/` can expose an OpenAI-compatible endpoint itself, enabling drop-in use by existing OpenAI clients.
+The internal wire format for LLM messages and tool-calling is OpenAI-compatible.
 
 ---
 
