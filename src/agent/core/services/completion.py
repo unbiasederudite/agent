@@ -2,8 +2,6 @@
 
 from typing import Any
 
-from agent.core.exceptions import AgentError
-from agent.core.models.config import AgentConfig
 from agent.core.models.message import Message
 from agent.core.models.run import Run
 from agent.core.protocols.itool import ITool
@@ -32,7 +30,7 @@ def _tool_schema(tool: ITool) -> dict[str, Any]:
 class CompletionService:
     """Orchestrates a single chat-completion request against a registered LLM.
 
-    Optionally routed through a registered agent's system prompt, defaults, and tools.
+    Always routed through a registered agent's system prompt, defaults, and tools.
     """
 
     def __init__(
@@ -55,65 +53,46 @@ class CompletionService:
     async def run(
         self,
         messages: list[Message],
+        agent: str,
         *,
-        agent: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         max_tokens: int | None = None,
         tools: list[str] | None = None,
     ) -> Run:
-        """Complete `messages`, optionally routed through a registered agent.
+        """Complete `messages`, routed through the registered agent `agent`.
 
-        `model`, if given, always selects the LLM to use; otherwise the selected agent's
-        `default_llm` is used. `temperature`/`top_p`/`max_tokens` resolve independently as:
-        this call's value, else the agent's configured value, else the LLM's own configured
-        default (resolved inside the LLM implementation). The agent's `system_prompt`, if an
-        agent is selected, is unconditionally prepended as the leading system message -- it
-        is never overridden by or merged with messages already present in `messages`.
+        `model`, if given, overrides the agent's `default_llm`. `temperature`/`top_p`/
+        `max_tokens` resolve independently as: this call's value, else the agent's
+        configured value, else the LLM's own configured default (resolved inside the LLM
+        implementation). The agent's `system_prompt` is unconditionally prepended as the
+        leading system message -- it is never overridden by or merged with messages already
+        present in `messages`.
 
         `tools` resolves as a tri-state, independent of the scalar params above: omitted or
-        `None` uses the selected agent's configured `tools` (or none, if no agent or the
-        agent has none); an explicit empty list suppresses tools entirely, even if the agent
-        has some; a non-empty list is used exactly as given, ignoring the agent's own. Every
-        resolved tool name is looked up in `ToolRegistry` and sent to the LLM as a function
-        schema; nothing executes any tool call the LLM returns.
+        `None` uses the agent's configured `tools` (or none, if it has none); an explicit
+        empty list suppresses tools entirely, even if the agent has some; a non-empty list is
+        used exactly as given, ignoring the agent's own. Every resolved tool name is looked up
+        in `ToolRegistry` and sent to the LLM as a function schema; nothing executes any tool
+        call the LLM returns.
 
         Raises:
-            AgentError: if neither `agent` nor `model` is given.
-            AgentNotFoundError: if `agent` is given and not registered.
+            AgentNotFoundError: if `agent` is not registered.
             LLMNotFoundError: if the resolved model is not registered.
             ToolNotFoundError: if a resolved tool name is not registered.
             LLMError: if the underlying LLM call fails.
         """
-        agent_config: AgentConfig | None = None
-        if agent is not None:
-            agent_config = self._agent_registry.get(agent)
-            messages = [Message(role="system", content=agent_config.system_prompt), *messages]
+        agent_config = self._agent_registry.get(agent)
+        messages = [Message(role="system", content=agent_config.system_prompt), *messages]
 
-        if model is not None:
-            effective_model = model
-        elif agent_config is not None:
-            effective_model = agent_config.default_llm
-        else:
-            raise AgentError("either `agent` or `model` must be given")
+        effective_model = model if model is not None else agent_config.default_llm
 
-        resolved_temperature = _first_not_none(
-            temperature, agent_config.temperature if agent_config is not None else None
-        )
-        resolved_top_p = _first_not_none(
-            top_p, agent_config.top_p if agent_config is not None else None
-        )
-        resolved_max_tokens = _first_not_none(
-            max_tokens, agent_config.max_tokens if agent_config is not None else None
-        )
+        resolved_temperature = _first_not_none(temperature, agent_config.temperature)
+        resolved_top_p = _first_not_none(top_p, agent_config.top_p)
+        resolved_max_tokens = _first_not_none(max_tokens, agent_config.max_tokens)
 
-        if tools is not None:
-            tool_names = tools
-        elif agent_config is not None:
-            tool_names = agent_config.tools
-        else:
-            tool_names = []
+        tool_names = tools if tools is not None else agent_config.tools
         tool_schemas = [
             _tool_schema(self._tool_registry.get(name)) for name in dict.fromkeys(tool_names)
         ] or None

@@ -20,3 +20,19 @@ def test_agent_registry_get_given_unregistered_name_raises_agent_not_found_error
 
     with pytest.raises(AgentNotFoundError):
         registry.get("missing")
+
+
+def test_agent_registry_all_given_registered_agents_returns_name_to_instance_mapping():
+    registry = AgentRegistry()
+    agent = AgentConfig(
+        name="researcher", system_prompt="You are helpful.", default_llm="openai/gpt-4o"
+    )
+    registry.register("researcher", agent)
+
+    assert registry.all() == {"researcher": agent}
+
+
+def test_agent_registry_all_given_none_registered_returns_empty_dict():
+    registry = AgentRegistry()
+
+    assert registry.all() == {}

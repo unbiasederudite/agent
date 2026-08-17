@@ -31,3 +31,7 @@ class _Registry[T]:
             return self._items[name]
         except KeyError:
             raise self._not_found_error(name) from None
+
+    def all(self) -> dict[str, T]:
+        """Return a copy of every registered `name -> instance` mapping."""
+        return dict(self._items)

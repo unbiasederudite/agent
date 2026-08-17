@@ -1,11 +1,6 @@
 import pytest
 
-from agent.core.exceptions import (
-    AgentError,
-    AgentNotFoundError,
-    LLMNotFoundError,
-    ToolNotFoundError,
-)
+from agent.core.exceptions import AgentNotFoundError, LLMNotFoundError, ToolNotFoundError
 from agent.core.models.completion import Completion
 from agent.core.models.config import AgentConfig
 from agent.core.models.message import Message
@@ -65,30 +60,27 @@ def _tool_registry() -> ToolRegistry:
     return registry
 
 
-async def test_run_given_model_only_uses_model_and_no_system_prompt():
-    llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), ToolRegistry())
-    messages = [Message(role="user", content="hello")]
-
-    run = await service.run(messages, model="openai/gpt-4o")
-
-    assert run.model == "openai/gpt-4o"
-    assert run.request == messages
-    assert llm.last_messages == messages
-
-
-async def test_run_given_agent_only_uses_agent_default_llm_and_prepends_system_prompt():
-    llm = _FakeLLM(_completion())
+def _service(
+    llm: _FakeLLM,
+    *,
+    agent: AgentConfig | None = None,
+    tools: ToolRegistry | None = None,
+) -> CompletionService:
     llm_registry = LLMRegistry()
     llm_registry.register("openai/gpt-4o", llm)
     agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent())
-    service = CompletionService(llm_registry, agent_registry, ToolRegistry())
+    agent_registry.register("researcher", agent if agent is not None else _researcher_agent())
+    return CompletionService(
+        llm_registry, agent_registry, tools if tools is not None else ToolRegistry()
+    )
+
+
+async def test_run_given_agent_uses_its_default_llm_and_prepends_system_prompt():
+    llm = _FakeLLM(_completion())
+    service = _service(llm)
     messages = [Message(role="user", content="hello")]
 
-    run = await service.run(messages, agent="researcher")
+    run = await service.run(messages, "researcher")
 
     assert run.model == "openai/gpt-4o"
     assert llm.last_messages is not None
@@ -96,7 +88,7 @@ async def test_run_given_agent_only_uses_agent_default_llm_and_prepends_system_p
     assert llm.last_messages[1:] == messages
 
 
-async def test_run_given_agent_and_model_uses_model_with_agent_system_prompt():
+async def test_run_given_model_override_uses_model_with_agent_system_prompt():
     llm = _FakeLLM(_completion())
     llm_registry = LLMRegistry()
     llm_registry.register("anthropic/claude-sonnet-5", llm)
@@ -105,7 +97,7 @@ async def test_run_given_agent_and_model_uses_model_with_agent_system_prompt():
     service = CompletionService(llm_registry, agent_registry, ToolRegistry())
     messages = [Message(role="user", content="hello")]
 
-    run = await service.run(messages, agent="researcher", model="anthropic/claude-sonnet-5")
+    run = await service.run(messages, "researcher", model="anthropic/claude-sonnet-5")
 
     assert run.model == "anthropic/claude-sonnet-5"
     assert llm.last_messages is not None
@@ -114,17 +106,13 @@ async def test_run_given_agent_and_model_uses_model_with_agent_system_prompt():
 
 async def test_run_given_client_system_message_is_not_merged_or_overridden():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent())
-    service = CompletionService(llm_registry, agent_registry, ToolRegistry())
+    service = _service(llm)
     messages = [
         Message(role="system", content="client's own prompt"),
         Message(role="user", content="hi"),
     ]
 
-    await service.run(messages, agent="researcher")
+    await service.run(messages, "researcher")
 
     assert llm.last_messages == [
         Message(role="system", content="You are a research assistant."),
@@ -137,82 +125,43 @@ async def test_run_given_unregistered_agent_raises_agent_not_found_error():
     service = CompletionService(LLMRegistry(), AgentRegistry(), ToolRegistry())
 
     with pytest.raises(AgentNotFoundError):
-        await service.run([Message(role="user", content="hi")], agent="missing")
+        await service.run([Message(role="user", content="hi")], "missing")
 
 
-async def test_run_given_unregistered_model_raises_llm_not_found_error():
-    service = CompletionService(LLMRegistry(), AgentRegistry(), ToolRegistry())
+async def test_run_given_model_override_to_unregistered_model_raises_llm_not_found_error():
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", _researcher_agent())
+    service = CompletionService(LLMRegistry(), agent_registry, ToolRegistry())
 
     with pytest.raises(LLMNotFoundError):
-        await service.run([Message(role="user", content="hi")], model="missing/model")
+        await service.run([Message(role="user", content="hi")], "researcher", model="missing/model")
 
 
 async def test_run_given_request_temperature_overrides_agent_temperature():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent(temperature=0.1))
-    service = CompletionService(llm_registry, agent_registry, ToolRegistry())
+    service = _service(llm, agent=_researcher_agent(temperature=0.1))
 
-    await service.run([Message(role="user", content="hi")], agent="researcher", temperature=0.9)
+    await service.run([Message(role="user", content="hi")], "researcher", temperature=0.9)
 
     assert llm.last_temperature == 0.9
 
 
 async def test_run_given_no_request_temperature_uses_agent_temperature():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent(temperature=0.1))
-    service = CompletionService(llm_registry, agent_registry, ToolRegistry())
+    service = _service(llm, agent=_researcher_agent(temperature=0.1))
 
-    await service.run([Message(role="user", content="hi")], agent="researcher")
+    await service.run([Message(role="user", content="hi")], "researcher")
 
     assert llm.last_temperature == 0.1
 
 
-async def test_run_given_no_agent_and_no_request_sampling_forwards_none():
-    llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), ToolRegistry())
-
-    await service.run([Message(role="user", content="hi")], model="openai/gpt-4o")
-
-    assert llm.last_temperature is None
-    assert llm.last_top_p is None
-    assert llm.last_max_tokens is None
-
-
-async def test_run_given_neither_agent_nor_model_raises_agent_error():
-    service = CompletionService(LLMRegistry(), AgentRegistry(), ToolRegistry())
-
-    with pytest.raises(AgentError):
-        await service.run([Message(role="user", content="hi")])
-
-
-async def test_run_given_no_tools_and_no_agent_forwards_none():
-    llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), ToolRegistry())
-
-    await service.run([Message(role="user", content="hi")], model="openai/gpt-4o")
-
-    assert llm.last_tools is None
-
-
 async def test_run_given_no_request_tools_uses_agent_tools():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent(tools=["get_current_time"]))
-    service = CompletionService(llm_registry, agent_registry, _tool_registry())
+    service = _service(
+        llm, agent=_researcher_agent(tools=["get_current_time"]), tools=_tool_registry()
+    )
 
-    await service.run([Message(role="user", content="hi")], agent="researcher")
+    await service.run([Message(role="user", content="hi")], "researcher")
 
     assert llm.last_tools is not None
     assert llm.last_tools[0]["function"]["name"] == "get_current_time"
@@ -220,27 +169,21 @@ async def test_run_given_no_request_tools_uses_agent_tools():
 
 async def test_run_given_empty_request_tools_suppresses_agent_tools():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent(tools=["get_current_time"]))
-    service = CompletionService(llm_registry, agent_registry, _tool_registry())
+    service = _service(
+        llm, agent=_researcher_agent(tools=["get_current_time"]), tools=_tool_registry()
+    )
 
-    await service.run([Message(role="user", content="hi")], agent="researcher", tools=[])
+    await service.run([Message(role="user", content="hi")], "researcher", tools=[])
 
     assert llm.last_tools is None
 
 
 async def test_run_given_request_tools_overrides_agent_tools():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    agent_registry = AgentRegistry()
-    agent_registry.register("researcher", _researcher_agent(tools=[]))
-    service = CompletionService(llm_registry, agent_registry, _tool_registry())
+    service = _service(llm, agent=_researcher_agent(tools=[]), tools=_tool_registry())
 
     await service.run(
-        [Message(role="user", content="hi")], agent="researcher", tools=["get_current_time"]
+        [Message(role="user", content="hi")], "researcher", tools=["get_current_time"]
     )
 
     assert llm.last_tools is not None
@@ -249,39 +192,19 @@ async def test_run_given_request_tools_overrides_agent_tools():
 
 async def test_run_given_unresolvable_tool_name_raises_tool_not_found_error():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), ToolRegistry())
+    service = _service(llm)
 
     with pytest.raises(ToolNotFoundError):
-        await service.run(
-            [Message(role="user", content="hi")], model="openai/gpt-4o", tools=["missing"]
-        )
-
-
-async def test_run_given_no_agent_and_explicit_request_tools_resolves_them():
-    llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), _tool_registry())
-
-    await service.run(
-        [Message(role="user", content="hi")], model="openai/gpt-4o", tools=["get_current_time"]
-    )
-
-    assert llm.last_tools is not None
-    assert llm.last_tools[0]["function"]["name"] == "get_current_time"
+        await service.run([Message(role="user", content="hi")], "researcher", tools=["missing"])
 
 
 async def test_run_given_duplicate_request_tools_deduplicates_schemas():
     llm = _FakeLLM(_completion())
-    llm_registry = LLMRegistry()
-    llm_registry.register("openai/gpt-4o", llm)
-    service = CompletionService(llm_registry, AgentRegistry(), _tool_registry())
+    service = _service(llm, tools=_tool_registry())
 
     await service.run(
         [Message(role="user", content="hi")],
-        model="openai/gpt-4o",
+        "researcher",
         tools=["get_current_time", "get_current_time"],
     )
 

@@ -1,4 +1,4 @@
-"""CLI entrypoint for running the chat completions API server."""
+"""CLI entrypoint for running the agent API server."""
 
 import argparse
 from pathlib import Path
@@ -11,7 +11,7 @@ from agent.api.app import create_app
 def main(argv: list[str] | None = None) -> None:
     """Parse CLI arguments, build the app, and start the uvicorn server."""
     parser = argparse.ArgumentParser(
-        prog="python -m agent.api", description="Run the agent-core chat completions API."
+        prog="python -m agent.api", description="Run the agent-core agent API."
     )
     parser.add_argument(
         "--config", type=Path, required=True, help="Path to the AppConfig JSON file."

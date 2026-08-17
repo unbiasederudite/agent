@@ -4,8 +4,8 @@ Inbound HTTP adapter. Thin translation layer between HTTP and `core/services/` �
 
 ## Contents
 
-- `schemas.py` — OpenAI-compatible request/response models for `/v1/chat/completions`; the request accepts an optional `agent` and optional `model` (at least one required), optional `temperature`/`top_p`/`max_completion_tokens` (OpenAI's current field name; the deprecated `max_tokens` is not accepted, silently ignored as an unrecognized field), and an optional tri-state `tools` (registered tool **names**, not OpenAI-format function-definition objects — a deliberate divergence, since the server only ever offers tools it has itself registered; omitted uses the agent's tools, `[]` suppresses them, a list overrides them). OpenAI's `tool_choice`/`parallel_tool_calls` request fields are not modeled and are silently ignored if sent. A request message's `tool_calls` is rejected (400) — this milestone has no `role: "tool"`/`tool_call_id` support to complete a replayed round trip. `ChatToolCall`/`ChatToolCallFunction` model an OpenAI-compatible tool call in the response. `ErrorDetail`/`ErrorResponse` model the OpenAI-compatible `{"error": {...}}` error envelope.
-- `app.py` — `create_app(config_path)` builds the FastAPI app from an `AppConfig` JSON file; `add_chat_completions_route()` registers the route on a given app instance, plus three exception handlers (`RequestValidationError`, `StarletteHTTPException`, and a catch-all) that translate every error response (validation failures, `AgentError` subclasses, framework-level errors) into OpenAI's `{"error": {message, type, param, code}}` shape
+- `schemas.py` — backend-native request/response models. `AgentRunRequest`/`AgentRunResponse` model `POST /v1/agents/{agent_name}` (`messages`, optional `model`/`temperature`/`top_p`/`max_tokens` overrides, tri-state `tools`: omitted uses the agent's tools, `[]` suppresses them, a list overrides them). `messages` and the response `message`/`usage` reuse `core.models.message.Message` and `core.models.usage.Usage` directly rather than duplicating identical DTOs — `models` is cross-cutting per `ARCHITECTURE.md`, so there's nothing to translate for those. `AgentRunResponse` stays its own model rather than reusing `core.models.run.Run` wholesale: `Run.request` would leak the agent's prepended `system_prompt`. A request message's `tool_calls` is rejected (400) — this milestone has no `role: "tool"`/`tool_call_id` support to complete a replayed round trip. `AgentSummary`/`ToolSummary` model the `GET /v1/agents`/`GET /v1/tools` listing entries — deliberately reduced projections (`AgentSummary` omits `AgentConfig.system_prompt` and sampling defaults) rather than reusing the core models, since exposing those isn't safe.
+- `app.py` — `create_app(config_path)` builds the FastAPI app from an `AppConfig` JSON file. `add_agent_run_route()` registers `POST /v1/agents/{agent_name}`; `add_registry_routes()` registers `GET /v1/agents`, `GET /v1/tools`, `GET /v1/llms`; `add_exception_handlers()` registers a 400 handler for request-validation failures and a 500 catch-all — every other status (404/429/502/504/500 from `AgentError` subclasses, and framework 404/405s) is FastAPI's own `HTTPException`/Starlette handling.
 - `__main__.py` — CLI entrypoint: parses `--config`/`--host`/`--port` and starts the server
 
 ## Running
@@ -14,8 +14,6 @@ Inbound HTTP adapter. Thin translation layer between HTTP and `core/services/` �
 
 `--host` (default `127.0.0.1`) and `--port` (default `8000`) are optional.
 
-## Errors
+## Endpoints
 
-Every error response — validation failures (400), `AgentError` subclasses (404/429/502/504/500),
-and framework-level errors (unmatched routes, wrong HTTP method) — uses OpenAI's error envelope:
-`{"error": {"message": ..., "type": ..., "param": ..., "code": ...}}`.
+See the root `README.md`'s Endpoints section for the full request/response contract.

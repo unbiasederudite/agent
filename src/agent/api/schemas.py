@@ -1,60 +1,17 @@
-"""OpenAI-compatible request/response schemas for chat completions."""
+"""Backend-native request/response schemas for the agent-run and registry-listing routes."""
 
-from typing import Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-
-class ChatToolCallFunction(BaseModel):
-    """The function half of an OpenAI-compatible tool call."""
-
-    name: str = Field(description="Name of the tool to invoke.")
-    arguments: str = Field(description="Raw JSON string of arguments, unparsed.")
+from agent.core.models.message import Message
+from agent.core.models.usage import Usage
 
 
-class ChatToolCall(BaseModel):
-    """An OpenAI-compatible tool call, as seen over the wire."""
+class AgentRunRequest(BaseModel):
+    """Request body for POST /v1/agents/{agent_name}."""
 
-    id: str = Field(description="Unique identifier for this tool call.")
-    type: Literal["function"] = Field(default="function", description="The tool call type.")
-    function: ChatToolCallFunction = Field(description="The function to invoke.")
-
-
-class ChatMessage(BaseModel):
-    """An OpenAI-compatible chat message, as seen over the wire."""
-
-    role: Literal["system", "user", "assistant"] = Field(
-        description="The message's role in the conversation."
-    )
-    content: str | None = Field(
-        default=None, description="The message's text content. `None` when `tool_calls` is set."
-    )
-    tool_calls: list[ChatToolCall] | None = Field(
-        default=None, description="Tool calls the assistant wants invoked, if any."
-    )
-
-    @model_validator(mode="after")
-    def _require_content_or_tool_calls(self) -> "ChatMessage":
-        if self.content is None and not self.tool_calls:
-            raise ValueError("either `content` or `tool_calls` must be given")
-        return self
-
-
-class ChatCompletionRequest(BaseModel):
-    """Request body for POST /v1/chat/completions."""
-
-    agent: str | None = Field(
-        default=None, description="Name of a registered agent to route this request through."
-    )
-    model: str | None = Field(
-        default=None,
-        description=(
-            "litellm-format provider/model string to route this request to; must be "
-            "declared in the server's config. Defaults to the selected agent's "
-            "default_llm if omitted."
-        ),
-    )
-    messages: list[ChatMessage] = Field(
+    messages: list[Message] = Field(
         description=(
             "The conversation history to send. `tool_calls` on a message is response-only "
             'and rejected here -- this milestone has no `role: "tool"`/`tool_call_id` '
@@ -62,85 +19,65 @@ class ChatCompletionRequest(BaseModel):
             "only be rejected by the provider instead."
         )
     )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "litellm-format provider/model string overriding the agent's default_llm; must "
+            "be declared in the server's config."
+        ),
+    )
     temperature: float | None = Field(
         default=None, description="Overrides the agent's/LLM's configured default, if set."
     )
     top_p: float | None = Field(
         default=None, description="Overrides the agent's/LLM's configured default, if set."
     )
-    max_completion_tokens: int | None = Field(
-        default=None,
-        description=(
-            "Overrides the agent's/LLM's configured default, if set. Named to match OpenAI's "
-            "current field -- the older `max_tokens` is deprecated upstream and not accepted "
-            "here."
-        ),
+    max_tokens: int | None = Field(
+        default=None, description="Overrides the agent's/LLM's configured default, if set."
     )
     tools: list[str] | None = Field(
         default=None,
         description=(
-            "Registered tool names to offer the LLM. Omitted/null uses the selected "
-            "agent's configured tools (or none); an empty list suppresses tools even if "
-            "the agent has some; a non-empty list is used as-is, ignoring the agent's own."
+            "Registered tool names to offer the LLM. Omitted/null uses the agent's "
+            "configured tools (or none); an empty list suppresses tools even if the agent "
+            "has some; a non-empty list is used as-is, ignoring the agent's own."
         ),
     )
 
     @model_validator(mode="after")
-    def _require_agent_or_model(self) -> "ChatCompletionRequest":
-        if self.agent is None and self.model is None:
-            raise ValueError("either `agent` or `model` must be given")
-        return self
-
-    @model_validator(mode="after")
-    def _reject_inbound_tool_calls(self) -> "ChatCompletionRequest":
+    def _reject_inbound_tool_calls(self) -> "AgentRunRequest":
         if any(m.tool_calls for m in self.messages):
             raise ValueError("`tool_calls` on a request message is not supported")
         return self
 
 
-class ChatCompletionChoice(BaseModel):
-    """One completion choice in a chat.completion response."""
+class AgentRunResponse(BaseModel):
+    """Response body for POST /v1/agents/{agent_name}.
 
-    index: int = Field(description="Position of this choice in the choices list.")
-    message: ChatMessage = Field(description="The generated reply message.")
+    Deliberately not `core.models.run.Run` reused wholesale: `Run.request` echoes the full
+    resolved message list sent to the LLM, including the agent's prepended `system_prompt` --
+    exposing that here would leak agent identity content through every response.
+    """
+
+    model: str = Field(
+        description="The litellm-format provider/model string that ran this request."
+    )
+    message: Message = Field(description="The generated reply message.")
+    usage: Usage = Field(description="Token usage for this run.")
     finish_reason: str = Field(description="Why generation stopped.")
 
 
-class ChatCompletionUsage(BaseModel):
-    """Token usage in a chat.completion response."""
+class AgentSummary(BaseModel):
+    """One entry in the GET /v1/agents listing."""
 
-    prompt_tokens: int = Field(description="Number of tokens in the input.")
-    completion_tokens: int = Field(description="Number of tokens in the generated output.")
-    total_tokens: int = Field(description="Total tokens consumed (prompt + completion).")
-
-
-class ChatCompletionResponse(BaseModel):
-    """Response body for POST /v1/chat/completions."""
-
-    id: str = Field(description="Unique identifier for this completion.")
-    object: Literal["chat.completion"] = Field(
-        default="chat.completion", description="The object type."
-    )
-    created: int = Field(description="Unix timestamp of when the completion was created.")
-    model: str = Field(description="The model that generated this completion.")
-    choices: list[ChatCompletionChoice] = Field(description="The generated completion choices.")
-    usage: ChatCompletionUsage = Field(description="Token usage for this request.")
+    name: str = Field(description="The agent's lookup key.")
+    default_llm: str = Field(description="The LLM used when a request doesn't override `model`.")
+    tools: list[str] = Field(description="Tool names available to this agent by default.")
 
 
-class ErrorDetail(BaseModel):
-    """OpenAI-compatible error detail."""
+class ToolSummary(BaseModel):
+    """One entry in the GET /v1/tools listing."""
 
-    message: str = Field(description="A human-readable error message.")
-    type: str = Field(description='The error category, e.g. "invalid_request_error".')
-    param: str | None = Field(
-        default=None, description="The request field that caused the error, if any."
-    )
-    code: str | None = Field(
-        default=None, description="A short machine-readable error code, if any."
-    )
-
-
-class ErrorResponse(BaseModel):
-    """OpenAI-compatible error envelope for POST /v1/chat/completions."""
-
-    error: ErrorDetail = Field(description="The error details.")
+    name: str = Field(description="The tool's lookup key.")
+    description: str = Field(description="Human-readable description of what the tool does.")
+    parameters: dict[str, Any] = Field(description="JSON schema for the tool's call arguments.")
