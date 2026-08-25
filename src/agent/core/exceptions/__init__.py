@@ -25,6 +25,15 @@ class StrategyNotFoundError(AgentError):
     """Raised when a requested reasoning strategy name is not registered."""
 
 
+class SessionNotFoundError(AgentError):
+    """Raised when a requested (agent, session_id) pair is not registered.
+
+    Also raised when session_id is valid but was created under a different agent --
+    a session is locked to its creating agent, so cross-agent reuse is indistinguishable
+    from an unknown session.
+    """
+
+
 class LLMError(AgentError):
     """Raised when an outbound LLM call fails."""
 

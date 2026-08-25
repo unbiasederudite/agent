@@ -9,6 +9,7 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    SessionNotFoundError,
     StrategyNotFoundError,
     ToolNotFoundError,
 )
@@ -24,6 +25,7 @@ class _StubAgentRunService(AgentRunService):
         self.last_agent: str | None = None
         self.last_message: str | None = None
         self.last_strategy: str | None = None
+        self.last_session_id: str | None = None
 
     async def run(
         self,
@@ -36,21 +38,24 @@ class _StubAgentRunService(AgentRunService):
         top_p: float | None = None,
         max_tokens: int | None = None,
         tools: list[str] | None = None,
+        session_id: str | None = None,
     ) -> Run:
         self.last_agent = agent
         self.last_message = message
         self.last_strategy = strategy
+        self.last_session_id = session_id
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
 
 
-def _run(finish_reason: str = "stop") -> Run:
+def _run(finish_reason: str = "stop", session_id: str = "sess_1") -> Run:
     return Run(
         model="openai/gpt-4o",
         response=Message(role="assistant", content="hello!"),
         usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         finish_reason=finish_reason,
+        session_id=session_id,
     )
 
 
@@ -73,6 +78,7 @@ def test_run_agent_given_success_returns_200_with_message():
     assert body["usage"]["total_tokens"] == 2
     assert body["finish_reason"] == "stop"
     assert body["message"]["tool_calls"] is None
+    assert body["session_id"] == "sess_1"
 
 
 def test_run_agent_uses_the_path_segment_as_the_agent_name():
@@ -109,6 +115,30 @@ def test_run_agent_passes_the_body_strategy_through():
     client.post("/v1/agents/researcher", json={"message": "hi", "strategy": "rewoo"})
 
     assert service.last_strategy == "rewoo"
+
+
+def test_run_agent_passes_the_body_session_id_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi", "session_id": "sess_9"})
+
+    assert service.last_session_id == "sess_9"
+
+
+def test_run_agent_given_no_session_id_in_body_passes_none_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert service.last_session_id is None
 
 
 def test_run_agent_given_non_stop_finish_reason_is_not_hardcoded():
@@ -155,6 +185,17 @@ def test_run_agent_given_unknown_tool_returns_404():
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "tool_not_found"
+
+
+def test_run_agent_given_unknown_session_id_returns_404():
+    client = _client_for(SessionNotFoundError("nope"))
+
+    response = client.post(
+        "/v1/agents/researcher", json={"message": "hi", "session_id": "does-not-exist"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"
 
 
 def test_run_agent_given_llm_failure_returns_502():
@@ -224,6 +265,7 @@ def test_run_agent_given_tool_calls_message_serializes_correctly():
         ),
         usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         finish_reason="tool_calls",
+        session_id="sess_1",
     )
     client = _client_for(run)
 

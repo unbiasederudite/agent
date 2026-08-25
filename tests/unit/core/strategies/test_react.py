@@ -100,13 +100,20 @@ async def test_run_given_no_tool_calls_returns_after_one_llm_call():
     llm = _FakeLLM([_final_completion()])
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="hi")], llm, {}, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="hi")], llm, {}, max_iterations=10)
 
     assert len(llm.calls) == 1
-    assert completion.message.content == "final answer"
-    assert completion.finish_reason == "stop"
+    assert turn.message.content == "final answer"
+    assert turn.finish_reason == "stop"
+
+
+async def test_run_given_no_tool_calls_turn_messages_is_just_the_final_answer():
+    llm = _FakeLLM([_final_completion()])
+    strategy = ReactStrategy()
+
+    turn = await strategy.run([Message(role="user", content="hi")], llm, {}, max_iterations=10)
+
+    assert turn.messages == [Message(role="assistant", content="final answer")]
 
 
 async def test_run_given_one_tool_call_executes_it_and_calls_llm_again():
@@ -119,17 +126,42 @@ async def test_run_given_one_tool_call_executes_it_and_calls_llm_again():
     )
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
+    turn = await strategy.run(
         [Message(role="user", content="echo hi")], llm, tools, max_iterations=10
     )
 
     assert len(llm.calls) == 2
-    assert completion.message.content == "you said hi"
+    assert turn.message.content == "you said hi"
     second_call_messages = llm.calls[1]["messages"]
     assert second_call_messages[-1] == Message(
         role="tool", tool_call_id="call_1", name="echo", content="hi"
     )
     assert second_call_messages[-2].tool_calls == [_call("call_1", "echo", '{"value": "hi"}')]
+
+
+async def test_run_given_one_tool_call_turn_messages_is_the_full_generated_delta():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [
+            _tool_call_completion([_call("call_1", "echo", '{"value": "hi"}')]),
+            _final_completion("you said hi"),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    turn = await strategy.run(
+        [Message(role="user", content="echo hi")], llm, tools, max_iterations=10
+    )
+
+    assert turn.messages == [
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[_call("call_1", "echo", '{"value": "hi"}')],
+        ),
+        Message(role="tool", tool_call_id="call_1", name="echo", content="hi"),
+        Message(role="assistant", content="you said hi"),
+    ]
 
 
 async def test_run_given_multiple_tool_calls_executes_them_concurrently():
@@ -179,14 +211,12 @@ async def test_run_given_tool_call_names_an_unoffered_tool_returns_error_content
     llm = _FakeLLM([_tool_call_completion([_call("call_1", "missing", "{}")]), _final_completion()])
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, {}, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, {}, max_iterations=10)
 
     result_message = llm.calls[1]["messages"][-1]
     assert result_message.tool_call_id == "call_1"
     assert result_message.content == "Error: tool 'missing' was not offered for this call"
-    assert completion.message.content == "final answer"
+    assert turn.message.content == "final answer"
 
 
 async def test_run_given_tool_raises_returns_error_content_and_continues():
@@ -194,13 +224,11 @@ async def test_run_given_tool_raises_returns_error_content_and_continues():
     llm = _FakeLLM([_tool_call_completion([_call("call_1", "boom", "{}")]), _final_completion()])
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, tools, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
     result_message = llm.calls[1]["messages"][-1]
     assert result_message.content == "Error: tool exploded"
-    assert completion.message.content == "final answer"
+    assert turn.message.content == "final answer"
 
 
 async def test_run_given_malformed_json_arguments_returns_error_content_without_invoking_tool():
@@ -210,14 +238,12 @@ async def test_run_given_malformed_json_arguments_returns_error_content_without_
     )
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, tools, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
     result_message = llm.calls[1]["messages"][-1]
     assert result_message.content is not None
     assert result_message.content.startswith("Error:")
-    assert completion.message.content == "final answer"
+    assert turn.message.content == "final answer"
 
 
 async def test_run_given_non_object_json_arguments_returns_error_content_without_invoking_tool():
@@ -227,13 +253,11 @@ async def test_run_given_non_object_json_arguments_returns_error_content_without
     )
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, tools, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
     result_message = llm.calls[1]["messages"][-1]
     assert result_message.content == "Error: arguments must be a JSON object"
-    assert completion.message.content == "final answer"
+    assert turn.message.content == "final answer"
 
 
 async def test_run_given_max_iterations_exhausted_forces_one_final_call_without_tools():
@@ -242,14 +266,25 @@ async def test_run_given_max_iterations_exhausted_forces_one_final_call_without_
     llm = _FakeLLM([always_calls_tool, always_calls_tool, _final_completion("gave up")])
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, tools, max_iterations=2
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=2)
 
     assert len(llm.calls) == 3
     assert llm.calls[2]["tools"] is None
-    assert completion.message.content == "gave up"
-    assert completion.finish_reason == "stop"
+    assert turn.message.content == "gave up"
+    assert turn.finish_reason == "stop"
+
+
+async def test_run_given_max_iterations_exhausted_turn_messages_includes_every_round():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    always_calls_tool = _tool_call_completion([_call("call_1", "echo", '{"value": "x"}')])
+    llm = _FakeLLM([always_calls_tool, always_calls_tool, _final_completion("gave up")])
+    strategy = ReactStrategy()
+
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=2)
+
+    # 2 rounds x (assistant tool-call + tool result) + 1 forced final answer.
+    assert len(turn.messages) == 5
+    assert turn.messages[-1] == turn.message
 
 
 async def test_run_sums_usage_across_every_llm_call():
@@ -274,11 +309,9 @@ async def test_run_sums_usage_across_every_llm_call():
     )
     strategy = ReactStrategy()
 
-    completion = await strategy.run(
-        [Message(role="user", content="go")], llm, tools, max_iterations=10
-    )
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
-    assert completion.usage == Usage(prompt_tokens=30, completion_tokens=8, total_tokens=38)
+    assert turn.usage == Usage(prompt_tokens=30, completion_tokens=8, total_tokens=38)
 
 
 async def test_run_forwards_sampling_params_to_every_llm_call():
@@ -320,3 +353,16 @@ async def test_run_given_original_messages_list_is_not_mutated():
     await strategy.run(original, llm, tools, max_iterations=10)
 
     assert original == [Message(role="user", content="go")]
+
+
+async def test_run_returned_turn_messages_excludes_the_input_messages():
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "echo", '{"value": "x"}')]), _final_completion()]
+    )
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    strategy = ReactStrategy()
+    original = [Message(role="user", content="go")]
+
+    turn = await strategy.run(original, llm, tools, max_iterations=10)
+
+    assert original[0] not in turn.messages

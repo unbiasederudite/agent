@@ -19,6 +19,7 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    SessionNotFoundError,
     StrategyNotFoundError,
     ToolNotFoundError,
 )
@@ -28,6 +29,7 @@ from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
 from agent.core.services.agent_run import AgentRunService
+from agent.core.session_stores.in_memory import InMemorySessionStore
 
 
 def add_exception_handlers(app: FastAPI) -> None:
@@ -70,6 +72,7 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
                 top_p=request.top_p,
                 max_tokens=request.max_tokens,
                 tools=request.tools,
+                session_id=request.session_id,
             )
         except AgentNotFoundError as exc:
             raise HTTPException(
@@ -82,6 +85,10 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
         except StrategyNotFoundError as exc:
             raise HTTPException(
                 status_code=404, detail={"message": str(exc), "code": "strategy_not_found"}
+            ) from exc
+        except SessionNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail={"message": str(exc), "code": "session_not_found"}
             ) from exc
         except ToolNotFoundError as exc:
             raise HTTPException(
@@ -97,7 +104,11 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
             raise HTTPException(status_code=500, detail={"message": str(exc)}) from exc
 
         return AgentRunResponse(
-            model=run.model, message=run.response, usage=run.usage, finish_reason=run.finish_reason
+            model=run.model,
+            message=run.response,
+            usage=run.usage,
+            finish_reason=run.finish_reason,
+            session_id=run.session_id,
         )
 
 
@@ -143,8 +154,9 @@ def create_app(config_path: Path) -> FastAPI:
     llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt = build_registries(
         config_path
     )
+    session_store = InMemorySessionStore()
     agent_run_service = AgentRunService(
-        llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt
+        llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt, session_store
     )
 
     app = FastAPI()

@@ -6,6 +6,7 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    SessionNotFoundError,
     StrategyNotFoundError,
     ToolNotFoundError,
 )
@@ -41,3 +42,7 @@ def test_tool_not_found_error_is_agent_error():
 
 def test_strategy_not_found_error_is_agent_error():
     assert issubclass(StrategyNotFoundError, AgentError)
+
+
+def test_session_not_found_error_is_agent_error():
+    assert issubclass(SessionNotFoundError, AgentError)

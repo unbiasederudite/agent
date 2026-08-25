@@ -19,7 +19,7 @@ def test_agent_runs_given_agent_uses_its_model_and_persona():
     assert "pong" in body["message"]["content"].lower()
 
 
-def test_list_agents_given_real_config_returns_pong_bot():
+def test_list_agents_given_real_config_returns_both_agents():
     app = create_app(_CONFIG_PATH)
     client = TestClient(app)
 
@@ -27,5 +27,37 @@ def test_list_agents_given_real_config_returns_pong_bot():
 
     assert response.status_code == 200
     assert response.json() == [
-        {"name": "pong-bot", "model": "openai/gpt-4o-mini", "strategy": "react", "tools": []}
+        {"name": "pong-bot", "model": "openai/gpt-4o-mini", "strategy": "react", "tools": []},
+        {"name": "memory-bot", "model": "openai/gpt-4o-mini", "strategy": "react", "tools": []},
     ]
+
+
+def test_agent_runs_given_session_id_remembers_the_earlier_turn():
+    app = create_app(_CONFIG_PATH)
+    client = TestClient(app)
+
+    first = client.post(
+        "/v1/agents/memory-bot",
+        json={"message": "My favorite color is teal. Just say OK."},
+    )
+    session_id = first.json()["session_id"]
+
+    second = client.post(
+        "/v1/agents/memory-bot",
+        json={"message": "What's my favorite color?", "session_id": session_id},
+    )
+
+    assert second.status_code == 200
+    assert "teal" in second.json()["message"]["content"].lower()
+
+
+def test_agent_runs_given_unknown_session_id_returns_404():
+    app = create_app(_CONFIG_PATH)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/agents/memory-bot", json={"message": "hi", "session_id": "does-not-exist"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"

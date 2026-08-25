@@ -40,7 +40,7 @@ uv run python -m agent.api --config config.json
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/agents/{agent_name}` | Run `agent_name` against `message`. Body: `message` (required, a plain string), `model`/`strategy`/`temperature`/`top_p`/`max_tokens` (optional overrides), `tools` (optional, tri-state: omitted uses the agent's configured tools, `[]` suppresses them, a list overrides them). If the LLM requests a tool call, it is executed and fed back automatically (up to the agent's `max_tool_iterations`) before a response is returned. Returns `model`, `message`, `usage`, `finish_reason`. |
+| `POST` | `/v1/agents/{agent_name}` | Run `agent_name` against `message`. Body: `message` (required, a plain string), `model`/`strategy`/`temperature`/`top_p`/`max_tokens` (optional overrides), `tools` (optional, tri-state: omitted uses the agent's configured tools, `[]` suppresses them, a list overrides them), `session_id` (optional -- omit to start a new conversation, pass a prior response's `session_id` back to continue it). If the LLM requests a tool call, it is executed and fed back automatically (up to the agent's `max_tool_iterations`) before a response is returned. Returns `model`, `message`, `usage`, `finish_reason`, `session_id`. |
 | `GET` | `/v1/agents` | List registered agents: `name`, `model`, `strategy`, `tools`. |
 | `GET` | `/v1/tools` | List registered tools: `name`, `description`, `parameters` (JSON schema). |
 | `GET` | `/v1/models` | List registered model id strings. |

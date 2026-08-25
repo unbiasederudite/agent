@@ -5,6 +5,7 @@ from agent.api.app import add_registry_routes
 from agent.core.models.completion import Completion
 from agent.core.models.config import AgentConfig
 from agent.core.models.message import Message
+from agent.core.models.turn import Turn
 from agent.core.registries.agent import AgentRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
@@ -25,7 +26,7 @@ class _FakeLLM:
 
 
 class _FakeStrategy:
-    async def run(self, *args: object, **kwargs: object) -> Completion:
+    async def run(self, *args: object, **kwargs: object) -> Turn:
         raise NotImplementedError
 
 

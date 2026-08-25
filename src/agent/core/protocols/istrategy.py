@@ -2,14 +2,14 @@
 
 from typing import Protocol
 
-from agent.core.models.completion import Completion
 from agent.core.models.message import Message
+from agent.core.models.turn import Turn
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
 
 
 class IStrategy(Protocol):
-    """Interface for a reasoning loop that turns messages into a final Completion.
+    """Interface for a reasoning loop that turns messages into a final Turn.
 
     Owns everything about how (and whether) tools get offered to and invoked by the LLM;
     `messages` is the already-resolved initial list (system prompt + user turn). `tools` is
@@ -26,8 +26,8 @@ class IStrategy(Protocol):
         temperature: float | None = None,
         top_p: float | None = None,
         max_tokens: int | None = None,
-    ) -> Completion:
-        """Run the loop and return the final Completion.
+    ) -> Turn:
+        """Run the loop and return the final Turn.
 
         `tools` maps offered tool names to their instances -- the exhaustive set this
         strategy may invoke, already resolved by the caller. `max_iterations` bounds

@@ -282,3 +282,85 @@ def test_create_app_given_valid_config_lists_agents_tools_llms_and_strategies(
     assert client.get("/v1/tools").json()[0]["name"] == "get_current_time"
     assert client.get("/v1/models").json() == ["openai/gpt-4o"]
     assert client.get("/v1/strategies").json() == ["react"]
+
+
+def test_create_app_given_no_session_id_returns_a_new_one_and_second_call_reuses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    config_path = _agent_config_path(tmp_path)
+
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    first = client.post("/v1/agents/researcher", json={"message": "my name is Sam"})
+    session_id = first.json()["session_id"]
+    assert session_id
+
+    client.post(
+        "/v1/agents/researcher",
+        json={"message": "what's my name?", "session_id": session_id},
+    )
+
+    second_call_messages = mock_acompletion.call_args_list[1].kwargs["messages"]
+    assert second_call_messages[1] == {"role": "user", "content": "my name is Sam"}
+    assert second_call_messages[2] == {"role": "assistant", "content": "hello!"}
+    assert second_call_messages[3] == {"role": "user", "content": "what's my name?"}
+
+
+def test_create_app_given_unknown_session_id_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/agents/researcher", json={"message": "hi", "session_id": "does-not-exist"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"
+
+
+def test_create_app_given_session_id_reused_under_a_different_agent_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "strategies": [{"name": "react"}],
+                "agents": [
+                    {
+                        "name": "researcher",
+                        "system_prompt": "You are a research assistant.",
+                        "model": "openai/gpt-4o",
+                        "strategy": "react",
+                    },
+                    {
+                        "name": "scheduler",
+                        "system_prompt": "You are a scheduling assistant.",
+                        "model": "openai/gpt-4o",
+                        "strategy": "react",
+                    },
+                ],
+            }
+        )
+    )
+
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    first = client.post("/v1/agents/researcher", json={"message": "hi"})
+    session_id = first.json()["session_id"]
+
+    response = client.post("/v1/agents/scheduler", json={"message": "hi", "session_id": session_id})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"

@@ -4,8 +4,8 @@ import asyncio
 import json
 from typing import Any
 
-from agent.core.models.completion import Completion
 from agent.core.models.message import Message, ToolCall
+from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
@@ -90,11 +90,12 @@ class ReactStrategy:
         temperature: float | None = None,
         top_p: float | None = None,
         max_tokens: int | None = None,
-    ) -> Completion:
-        """Run the ReAct loop and return the final Completion."""
+    ) -> Turn:
+        """Run the ReAct loop and return the final Turn."""
         tool_schemas = [_tool_schema(tool) for tool in tools.values()] or None
 
         messages = list(messages)
+        input_length = len(messages)
         total_usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
         for _ in range(max_iterations):
@@ -107,8 +108,9 @@ class ReactStrategy:
             )
             total_usage = _sum_usage(total_usage, completion.usage)
             if not completion.message.tool_calls:
-                return Completion(
-                    message=completion.message,
+                messages.append(completion.message)
+                return Turn(
+                    messages=messages[input_length:],
                     usage=total_usage,
                     finish_reason=completion.finish_reason,
                 )
@@ -126,6 +128,7 @@ class ReactStrategy:
             tools=None,
         )
         total_usage = _sum_usage(total_usage, final.usage)
-        return Completion(
-            message=final.message, usage=total_usage, finish_reason=final.finish_reason
+        messages.append(final.message)
+        return Turn(
+            messages=messages[input_length:], usage=total_usage, finish_reason=final.finish_reason
         )

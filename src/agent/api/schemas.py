@@ -40,6 +40,14 @@ class AgentRunRequest(BaseModel):
             "has some; a non-empty list is used as-is, ignoring the agent's own."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Continues an existing conversation with this agent. Omit to start a new one "
+            "-- the response's session_id is then a freshly created one to pass on the "
+            "next call. A session_id created under a different agent is treated as unknown."
+        ),
+    )
 
 
 class AgentRunResponse(BaseModel):
@@ -55,6 +63,11 @@ class AgentRunResponse(BaseModel):
     message: Message = Field(description="The generated reply message.")
     usage: Usage = Field(description="Token usage for this run.")
     finish_reason: str = Field(description="Why generation stopped.")
+    session_id: str = Field(
+        description=(
+            "The session this response belongs to -- pass it back to continue the conversation."
+        )
+    )
 
 
 class AgentSummary(BaseModel):

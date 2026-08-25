@@ -17,3 +17,9 @@ class Run(BaseModel):
     finish_reason: str = Field(
         description='Why generation stopped (e.g. "stop", "length", "content_filter").'
     )
+    session_id: str = Field(
+        description=(
+            "The session this execution belongs to -- the given session_id, echoed back, "
+            "or a newly created one if none was given."
+        )
+    )
