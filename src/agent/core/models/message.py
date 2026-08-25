@@ -11,9 +11,9 @@ class ToolCallFunction(BaseModel):
     name: str = Field(description="Name of the tool to invoke.")
     arguments: str = Field(
         description=(
-            "Raw JSON string of arguments, unparsed -- parsing it against the tool's "
-            "declared parameter schema is a future milestone's (the executor's) job, "
-            "not this one's."
+            "Raw JSON string of arguments. The executing IStrategy parses this with "
+            "json.loads, but nothing validates the result against the tool's declared "
+            "`ITool.parameters` schema."
         )
     )
 
@@ -29,7 +29,7 @@ class ToolCall(BaseModel):
 class Message(BaseModel):
     """A single chat message in OpenAI-compatible wire format."""
 
-    role: Literal["system", "user", "assistant"] = Field(
+    role: Literal["system", "user", "assistant", "tool"] = Field(
         description="The message's role in the conversation."
     )
     content: str | None = Field(
@@ -39,9 +39,26 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = Field(
         default=None, description="Tool calls the LLM wants invoked, if any."
     )
+    tool_call_id: str | None = Field(
+        default=None,
+        description='The `ToolCall.id` this message answers. Required when `role="tool"`.',
+    )
+    name: str | None = Field(
+        default=None,
+        description='The tool name this message answers. Required when `role="tool"`.',
+    )
 
     @model_validator(mode="after")
-    def _require_content_or_tool_calls(self) -> "Message":
-        if self.content is None and not self.tool_calls:
+    def _validate_role_shape(self) -> "Message":
+        if self.role == "tool":
+            if self.tool_call_id is None:
+                raise ValueError('`tool_call_id` is required when role="tool"')
+            if self.name is None:
+                raise ValueError('`name` is required when role="tool"')
+            if self.content is None:
+                raise ValueError('`content` is required when role="tool"')
+            if self.tool_calls:
+                raise ValueError('`tool_calls` must not be set when role="tool"')
+        elif self.content is None and not self.tool_calls:
             raise ValueError("either `content` or `tool_calls` must be given")
         return self

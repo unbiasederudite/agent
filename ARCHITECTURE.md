@@ -11,7 +11,7 @@
 | `src/agent/core/factories/` | Factories that construct registered instances from configuration |
 | `src/agent/core/models/` | All Pydantic data models: domain models and startup config |
 | `src/agent/core/protocols/` | Protocol interfaces for anything with interchangeable implementations |
-| `src/agent/core/registries/` | Runtime registries for agents, LLMs, and tools |
+| `src/agent/core/registries/` | Runtime registries for agents, LLMs, tools, and strategies |
 | `src/agent/core/services/` | Use-case orchestration |
 | `src/agent/core/strategies/` | Reasoning and selection algorithm implementations |
 | `src/agent/core/tools/` | Concrete tool implementations |
@@ -56,6 +56,7 @@ Everything configurable is declared in a single JSON file loaded and validated a
 - **LLM registry** — available providers and their models
 - **Agent registry** — available agents, each with a system prompt, a strategy, a default LLM, and tools
 - **Tool registry** — available tools and their settings
+- **Strategy registry** — available reasoning strategies
 - **Compaction** — the LLM and settings used for compaction, plus the token budget that triggers it
 - **Logging** — minimum log level
 

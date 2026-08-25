@@ -21,6 +21,10 @@ class ToolNotFoundError(AgentError):
     """Raised when a requested tool name is not registered."""
 
 
+class StrategyNotFoundError(AgentError):
+    """Raised when a requested reasoning strategy name is not registered."""
+
+
 class LLMError(AgentError):
     """Raised when an outbound LLM call fails."""
 

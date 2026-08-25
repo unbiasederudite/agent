@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from agent.core.models.message import Message
 from agent.core.models.usage import Usage
@@ -11,20 +11,17 @@ from agent.core.models.usage import Usage
 class AgentRunRequest(BaseModel):
     """Request body for POST /v1/agents/{agent_name}."""
 
-    messages: list[Message] = Field(
-        description=(
-            "The conversation history to send. `tool_calls` on a message is response-only "
-            'and rejected here -- this milestone has no `role: "tool"`/`tool_call_id` '
-            "support, so a replayed assistant tool-call turn can't be completed and would "
-            "only be rejected by the provider instead."
-        )
-    )
+    message: str = Field(description="The user's message to send to the agent.")
     model: str | None = Field(
         default=None,
         description=(
-            "litellm-format provider/model string overriding the agent's default_llm; must "
+            "litellm-format provider/model string overriding the agent's configured `model`; "
             "be declared in the server's config."
         ),
+    )
+    strategy: str | None = Field(
+        default=None,
+        description="Reasoning strategy name overriding the agent's configured strategy.",
     )
     temperature: float | None = Field(
         default=None, description="Overrides the agent's/LLM's configured default, if set."
@@ -44,19 +41,12 @@ class AgentRunRequest(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def _reject_inbound_tool_calls(self) -> "AgentRunRequest":
-        if any(m.tool_calls for m in self.messages):
-            raise ValueError("`tool_calls` on a request message is not supported")
-        return self
-
 
 class AgentRunResponse(BaseModel):
     """Response body for POST /v1/agents/{agent_name}.
 
-    Deliberately not `core.models.run.Run` reused wholesale: `Run.request` echoes the full
-    resolved message list sent to the LLM, including the agent's prepended `system_prompt` --
-    exposing that here would leak agent identity content through every response.
+    Its own model rather than reusing `core.models.run.Run` directly, keeping the
+    API-facing DTO independent of the internal domain model.
     """
 
     model: str = Field(
@@ -71,7 +61,10 @@ class AgentSummary(BaseModel):
     """One entry in the GET /v1/agents listing."""
 
     name: str = Field(description="The agent's lookup key.")
-    default_llm: str = Field(description="The LLM used when a request doesn't override `model`.")
+    model: str = Field(description="The LLM used when a request doesn't override `model`.")
+    strategy: str = Field(
+        description="The reasoning strategy used when a request doesn't override `strategy`."
+    )
     tools: list[str] = Field(description="Tool names available to this agent by default.")
 
 

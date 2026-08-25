@@ -4,4 +4,4 @@ Use-case orchestration, called by inbound adapters.
 
 ## Contents
 
-- `completion.py` — `CompletionService`, resolves a required agent (and optional LLM override) by name and runs a single chat completion, prepending the agent's system prompt, resolving sampling defaults, and resolving the tri-state `tools` selection (request overrides agent, empty list suppresses) into OpenAI-format function schemas
+- `agent_run.py` — `AgentRunService`, resolves a required agent (and optional model/strategy/tools override) by name, builds the initial system+user messages (merging the process-wide `base_prompt`, if configured, into the agent's `system_prompt`), resolves tool names against `ToolRegistry` into instances before the strategy ever runs, and delegates to the selected `IStrategy` to run the reasoning loop and produce a `Run`

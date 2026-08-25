@@ -64,12 +64,15 @@ def test_agent_config_given_required_fields_constructs():
     config = AgentConfig(
         name="researcher",
         system_prompt="You are a research assistant.",
-        default_llm="openai/gpt-4o",
+        model="openai/gpt-4o",
+        strategy="react",
     )
 
     assert config.name == "researcher"
     assert config.system_prompt == "You are a research assistant."
-    assert config.default_llm == "openai/gpt-4o"
+    assert config.model == "openai/gpt-4o"
+    assert config.strategy == "react"
+    assert config.max_tool_iterations == 10
     assert config.temperature is None
     assert config.top_p is None
     assert config.max_tokens is None
@@ -79,7 +82,8 @@ def test_agent_config_given_sampling_params_constructs():
     config = AgentConfig(
         name="researcher",
         system_prompt="You are a research assistant.",
-        default_llm="openai/gpt-4o",
+        model="openai/gpt-4o",
+        strategy="react",
         temperature=0.1,
         top_p=0.8,
         max_tokens=256,
@@ -102,13 +106,13 @@ def test_app_config_given_agents_constructs():
     raw = (
         '{"llms": [{"model": "openai/gpt-4o"}], '
         '"agents": [{"name": "researcher", "system_prompt": "You are helpful.", '
-        '"default_llm": "openai/gpt-4o"}]}'
+        '"model": "openai/gpt-4o", "strategy": "react"}]}'
     )
 
     config = AppConfig.model_validate_json(raw)
 
     assert config.agents[0].name == "researcher"
-    assert config.agents[0].default_llm == "openai/gpt-4o"
+    assert config.agents[0].model == "openai/gpt-4o"
 
 
 def test_tool_config_given_name_constructs():
@@ -121,7 +125,8 @@ def test_agent_config_given_no_tools_defaults_to_empty_list():
     config = AgentConfig(
         name="researcher",
         system_prompt="You are a research assistant.",
-        default_llm="openai/gpt-4o",
+        model="openai/gpt-4o",
+        strategy="react",
     )
 
     assert config.tools == []
@@ -131,7 +136,8 @@ def test_agent_config_given_tools_constructs():
     config = AgentConfig(
         name="researcher",
         system_prompt="You are a research assistant.",
-        default_llm="openai/gpt-4o",
+        model="openai/gpt-4o",
+        strategy="react",
         tools=["get_current_time"],
     )
 
@@ -144,6 +150,27 @@ def test_app_config_given_no_tools_defaults_to_empty_list():
     config = AppConfig.model_validate_json(raw)
 
     assert config.tools == []
+
+
+def test_agent_config_given_no_strategy_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+        )
+
+
+def test_agent_config_given_max_tool_iterations_override_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        max_tool_iterations=3,
+    )
+
+    assert config.max_tool_iterations == 3
 
 
 def test_app_config_given_tools_constructs():

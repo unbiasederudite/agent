@@ -40,7 +40,8 @@ uv run python -m agent.api --config config.json
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/agents/{agent_name}` | Run `agent_name` against `messages`. Body: `messages` (required), `model`/`temperature`/`top_p`/`max_tokens` (optional overrides), `tools` (optional, tri-state: omitted uses the agent's configured tools, `[]` suppresses them, a list overrides them). Returns `model`, `message`, `usage`, `finish_reason`. |
-| `GET` | `/v1/agents` | List registered agents: `name`, `default_llm`, `tools`. |
+| `POST` | `/v1/agents/{agent_name}` | Run `agent_name` against `message`. Body: `message` (required, a plain string), `model`/`strategy`/`temperature`/`top_p`/`max_tokens` (optional overrides), `tools` (optional, tri-state: omitted uses the agent's configured tools, `[]` suppresses them, a list overrides them). If the LLM requests a tool call, it is executed and fed back automatically (up to the agent's `max_tool_iterations`) before a response is returned. Returns `model`, `message`, `usage`, `finish_reason`. |
+| `GET` | `/v1/agents` | List registered agents: `name`, `model`, `strategy`, `tools`. |
 | `GET` | `/v1/tools` | List registered tools: `name`, `description`, `parameters` (JSON schema). |
-| `GET` | `/v1/llms` | List registered model id strings. |
+| `GET` | `/v1/models` | List registered model id strings. |
+| `GET` | `/v1/strategies` | List registered reasoning strategy names (valid values for `strategy`). |

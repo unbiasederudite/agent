@@ -19,13 +19,15 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    StrategyNotFoundError,
     ToolNotFoundError,
 )
 from agent.core.factories.app import build_registries
 from agent.core.registries.agent import AgentRegistry
 from agent.core.registries.llm import LLMRegistry
+from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
-from agent.core.services.completion import CompletionService
+from agent.core.services.agent_run import AgentRunService
 
 
 def add_exception_handlers(app: FastAPI) -> None:
@@ -53,16 +55,17 @@ def add_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=500, content={"detail": {"message": str(exc)}})
 
 
-def add_agent_run_route(app: FastAPI, completion_service: CompletionService) -> None:
-    """Register POST /v1/agents/{agent_name} on `app`, backed by `completion_service`."""
+def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> None:
+    """Register POST /v1/agents/{agent_name} on `app`, backed by `agent_run_service`."""
 
     @app.post("/v1/agents/{agent_name}")
     async def run_agent(agent_name: str, request: AgentRunRequest) -> AgentRunResponse:
         try:
-            run = await completion_service.run(
-                request.messages,
+            run = await agent_run_service.run(
+                request.message,
                 agent_name,
                 model=request.model,
+                strategy=request.strategy,
                 temperature=request.temperature,
                 top_p=request.top_p,
                 max_tokens=request.max_tokens,
@@ -75,6 +78,10 @@ def add_agent_run_route(app: FastAPI, completion_service: CompletionService) -> 
         except LLMNotFoundError as exc:
             raise HTTPException(
                 status_code=404, detail={"message": str(exc), "code": "model_not_found"}
+            ) from exc
+        except StrategyNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail={"message": str(exc), "code": "strategy_not_found"}
             ) from exc
         except ToolNotFoundError as exc:
             raise HTTPException(
@@ -99,13 +106,19 @@ def add_registry_routes(
     agent_registry: AgentRegistry,
     tool_registry: ToolRegistry,
     llm_registry: LLMRegistry,
+    strategy_registry: StrategyRegistry,
 ) -> None:
-    """Register GET /v1/agents, GET /v1/tools, and GET /v1/llms on `app`."""
+    """Register GET /v1/agents, GET /v1/tools, GET /v1/models, GET /v1/strategies on `app`."""
 
     @app.get("/v1/agents")
     async def list_agents() -> list[AgentSummary]:
         return [
-            AgentSummary(name=name, default_llm=config.default_llm, tools=config.tools)
+            AgentSummary(
+                name=name,
+                model=config.model,
+                strategy=config.strategy,
+                tools=config.tools,
+            )
             for name, config in agent_registry.all().items()
         ]
 
@@ -116,18 +129,26 @@ def add_registry_routes(
             for name, tool in tool_registry.all().items()
         ]
 
-    @app.get("/v1/llms")
-    async def list_llms() -> list[str]:
+    @app.get("/v1/models")
+    async def list_models() -> list[str]:
         return list(llm_registry.all().keys())
+
+    @app.get("/v1/strategies")
+    async def list_strategies() -> list[str]:
+        return list(strategy_registry.all().keys())
 
 
 def create_app(config_path: Path) -> FastAPI:
     """Build the FastAPI app, wired from the AppConfig JSON at `config_path`."""
-    llm_registry, agent_registry, tool_registry = build_registries(config_path)
-    completion_service = CompletionService(llm_registry, agent_registry, tool_registry)
+    llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt = build_registries(
+        config_path
+    )
+    agent_run_service = AgentRunService(
+        llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt
+    )
 
     app = FastAPI()
     add_exception_handlers(app)
-    add_agent_run_route(app, completion_service)
-    add_registry_routes(app, agent_registry, tool_registry, llm_registry)
+    add_agent_run_route(app, agent_run_service)
+    add_registry_routes(app, agent_registry, tool_registry, llm_registry, strategy_registry)
     return app

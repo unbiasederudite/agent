@@ -45,12 +45,24 @@ class ToolConfig(BaseModel):
     name: str = Field(description="The tool's lookup key, matching a code-level implementation.")
 
 
+class StrategyConfig(BaseModel):
+    """One entry in the startup strategy allow-list.
+
+    `name` must match a code-level strategy implementation (see `core/factories/app.py`)
+    and is also the StrategyRegistry lookup key.
+    """
+
+    name: str = Field(
+        description="The strategy's lookup key, matching a code-level implementation."
+    )
+
+
 class AgentConfig(SamplingDefaults):
     """One entry in the startup agent allow-list.
 
     `name` is the AgentRegistry lookup key. `system_prompt` is unconditionally prepended
     as the leading system message whenever this agent is selected -- it is identity
-    content, not a request-overridable value. `default_llm` must match a declared
+    content, not a request-overridable value. `model` must match a declared
     `LLMConfig.model` in the same config. Every name in `tools` must match a declared
     `ToolConfig.name` in the same config.
     """
@@ -62,15 +74,25 @@ class AgentConfig(SamplingDefaults):
             "is selected; never overridden by client-supplied messages."
         )
     )
-    default_llm: str = Field(
+    model: str = Field(
         description="The LLMConfig.model used when the request doesn't override `model`."
+    )
+    strategy: str = Field(
+        description=(
+            "The StrategyRegistry lookup key used when the request doesn't override `strategy`."
+        )
     )
     tools: list[str] = Field(
         default_factory=list,
         description=(
             "Tool names available to this agent by default, unless the request "
-            "overrides them (see CompletionService.run's tri-state `tools` resolution)."
+            "overrides them (see AgentRunService.run's tri-state `tools` resolution)."
         ),
+    )
+    max_tool_iterations: int = Field(
+        default=10,
+        ge=1,
+        description="Caps rounds of call-LLM/maybe-call-a-tool a tool-calling strategy may run.",
     )
 
 
@@ -83,6 +105,19 @@ class AppConfig(BaseModel):
     )
     tools: list[ToolConfig] = Field(
         default_factory=list, description="The allow-list of tools available to this process."
+    )
+    strategies: list[StrategyConfig] = Field(
+        default_factory=list,
+        description="The allow-list of reasoning strategies available to this process.",
+    )
+    base_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Prepended before every agent's own `system_prompt`, merged into the same "
+            "leading system message -- not a second one. Shared instructions across every "
+            "agent in this deployment (e.g. house style, compliance rules); omit if there's "
+            "nothing to share."
+        ),
     )
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig, description="Logging configuration."

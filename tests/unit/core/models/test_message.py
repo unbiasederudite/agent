@@ -67,3 +67,44 @@ def test_message_given_tool_calls_dumps_nested_wire_shape():
             {"id": "call_1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
         ],
     }
+
+
+def test_message_given_tool_role_without_tool_call_id_raises_validation_error():
+    with pytest.raises(ValidationError):
+        Message(role="tool", content="42")
+
+
+def test_message_given_tool_role_without_name_raises_validation_error():
+    with pytest.raises(ValidationError):
+        Message(role="tool", tool_call_id="call_1", content="42")
+
+
+def test_message_given_tool_role_without_content_raises_validation_error():
+    with pytest.raises(ValidationError):
+        Message(role="tool", tool_call_id="call_1", name="get_current_time")
+
+
+def test_message_given_tool_role_with_tool_calls_raises_validation_error():
+    with pytest.raises(ValidationError):
+        Message(
+            role="tool",
+            tool_call_id="call_1",
+            name="get_current_time",
+            content="42",
+            tool_calls=[ToolCall(id="call_2", function=ToolCallFunction(name="f", arguments="{}"))],
+        )
+
+
+def test_message_given_tool_role_with_id_name_and_content_constructs():
+    message = Message(role="tool", tool_call_id="call_1", name="get_current_time", content="42")
+
+    assert message.role == "tool"
+    assert message.tool_call_id == "call_1"
+    assert message.name == "get_current_time"
+    assert message.content == "42"
+
+
+def test_message_given_non_tool_role_defaults_tool_call_id_to_none():
+    message = Message(role="user", content="hi")
+
+    assert message.tool_call_id is None

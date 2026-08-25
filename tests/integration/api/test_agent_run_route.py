@@ -9,31 +9,37 @@ from agent.core.exceptions import (
     LLMNotFoundError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    StrategyNotFoundError,
     ToolNotFoundError,
 )
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
 from agent.core.models.run import Run
 from agent.core.models.usage import Usage
-from agent.core.services.completion import CompletionService
+from agent.core.services.agent_run import AgentRunService
 
 
-class _StubCompletionService(CompletionService):
+class _StubAgentRunService(AgentRunService):
     def __init__(self, result: Run | Exception) -> None:
         self._result = result
         self.last_agent: str | None = None
+        self.last_message: str | None = None
+        self.last_strategy: str | None = None
 
     async def run(
         self,
-        messages: list[Message],
+        message: str,
         agent: str,
         *,
         model: str | None = None,
+        strategy: str | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         max_tokens: int | None = None,
         tools: list[str] | None = None,
     ) -> Run:
         self.last_agent = agent
+        self.last_message = message
+        self.last_strategy = strategy
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -42,7 +48,6 @@ class _StubCompletionService(CompletionService):
 def _run(finish_reason: str = "stop") -> Run:
     return Run(
         model="openai/gpt-4o",
-        request=[Message(role="user", content="hi")],
         response=Message(role="assistant", content="hello!"),
         usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         finish_reason=finish_reason,
@@ -52,16 +57,14 @@ def _run(finish_reason: str = "stop") -> Run:
 def _client_for(result: Run | Exception) -> TestClient:
     app = FastAPI()
     add_exception_handlers(app)
-    add_agent_run_route(app, _StubCompletionService(result))
+    add_agent_run_route(app, _StubAgentRunService(result))
     return TestClient(app, raise_server_exceptions=False)
 
 
 def test_run_agent_given_success_returns_200_with_message():
     client = _client_for(_run())
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 200
     body = response.json()
@@ -73,23 +76,45 @@ def test_run_agent_given_success_returns_200_with_message():
 
 
 def test_run_agent_uses_the_path_segment_as_the_agent_name():
-    service = _StubCompletionService(_run())
+    service = _StubAgentRunService(_run())
     app = FastAPI()
     add_exception_handlers(app)
     add_agent_run_route(app, service)
     client = TestClient(app)
 
-    client.post("/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]})
+    client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert service.last_agent == "researcher"
+
+
+def test_run_agent_passes_the_body_message_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "what time is it?"})
+
+    assert service.last_message == "what time is it?"
+
+
+def test_run_agent_passes_the_body_strategy_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi", "strategy": "rewoo"})
+
+    assert service.last_strategy == "rewoo"
 
 
 def test_run_agent_given_non_stop_finish_reason_is_not_hardcoded():
     client = _client_for(_run(finish_reason="length"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.json()["finish_reason"] == "length"
 
@@ -97,9 +122,7 @@ def test_run_agent_given_non_stop_finish_reason_is_not_hardcoded():
 def test_run_agent_given_unknown_agent_returns_404():
     client = _client_for(AgentNotFoundError("nope"))
 
-    response = client.post(
-        "/v1/agents/nope", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/nope", json={"message": "hi"})
 
     assert response.status_code == 404
     detail = response.json()["detail"]
@@ -110,22 +133,25 @@ def test_run_agent_given_unknown_agent_returns_404():
 def test_run_agent_given_unknown_model_override_returns_404():
     client = _client_for(LLMNotFoundError("nope/nope"))
 
-    response = client.post(
-        "/v1/agents/researcher",
-        json={"messages": [{"role": "user", "content": "hi"}], "model": "nope/nope"},
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "model": "nope/nope"})
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "model_not_found"
 
 
+def test_run_agent_given_unknown_strategy_override_returns_404():
+    client = _client_for(StrategyNotFoundError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "strategy": "nope"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "strategy_not_found"
+
+
 def test_run_agent_given_unknown_tool_returns_404():
     client = _client_for(ToolNotFoundError("nope"))
 
-    response = client.post(
-        "/v1/agents/researcher",
-        json={"messages": [{"role": "user", "content": "hi"}], "tools": ["nope"]},
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "tools": ["nope"]})
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "tool_not_found"
@@ -134,9 +160,7 @@ def test_run_agent_given_unknown_tool_returns_404():
 def test_run_agent_given_llm_failure_returns_502():
     client = _client_for(LLMError("provider down"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 502
     assert response.json()["detail"]["message"] == "provider down"
@@ -145,9 +169,7 @@ def test_run_agent_given_llm_failure_returns_502():
 def test_run_agent_given_rate_limited_error_returns_429():
     client = _client_for(LLMRateLimitedError("rate limited"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 429
 
@@ -155,9 +177,7 @@ def test_run_agent_given_rate_limited_error_returns_429():
 def test_run_agent_given_timeout_error_returns_504():
     client = _client_for(LLMTimeoutError("timed out"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 504
 
@@ -165,15 +185,13 @@ def test_run_agent_given_timeout_error_returns_504():
 def test_run_agent_given_generic_agent_error_returns_500():
     client = _client_for(AgentError("something unexpected"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 500
     assert response.json()["detail"]["message"] == "something unexpected"
 
 
-def test_run_agent_given_missing_messages_field_returns_400():
+def test_run_agent_given_missing_message_field_returns_400():
     client = _client_for(_run())
 
     response = client.post("/v1/agents/researcher", json={})
@@ -182,65 +200,25 @@ def test_run_agent_given_missing_messages_field_returns_400():
     assert "param" in response.json()["detail"]
 
 
-def test_run_agent_given_message_with_neither_content_nor_tool_calls_returns_400():
-    client = _client_for(_run())
-
-    response = client.post("/v1/agents/researcher", json={"messages": [{"role": "user"}]})
-
-    assert response.status_code == 400
-    message = response.json()["detail"]["message"]
-    assert message == "either `content` or `tool_calls` must be given"
-    assert not message.startswith("Value error,")
-
-
-def test_run_agent_given_inbound_tool_calls_returns_400():
-    client = _client_for(_run())
-
-    response = client.post(
-        "/v1/agents/researcher",
-        json={
-            "messages": [
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "get_current_time", "arguments": "{}"},
-                        }
-                    ],
-                }
-            ]
-        },
-    )
-
-    assert response.status_code == 400
-    message = response.json()["detail"]["message"]
-    assert message == "`tool_calls` on a request message is not supported"
-    assert not message.startswith("Value error,")
-
-
 def test_run_agent_given_unexpected_exception_returns_500():
     client = _client_for(RuntimeError("boom"))
 
-    response = client.post(
-        "/v1/agents/researcher", json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 500
     assert response.json()["detail"]["message"] == "boom"
 
 
-def test_run_agent_given_tools_field_returns_tool_calls_passthrough():
+def test_run_agent_given_tool_calls_message_serializes_correctly():
     run = Run(
         model="openai/gpt-4o",
-        request=[Message(role="user", content="what time is it?")],
         response=Message(
             role="assistant",
             content=None,
             tool_calls=[
                 ToolCall(
-                    id="call_1", function=ToolCallFunction(name="get_current_time", arguments="{}")
+                    id="call_1",
+                    function=ToolCallFunction(name="get_current_time", arguments="{}"),
                 )
             ],
         ),
@@ -250,11 +228,7 @@ def test_run_agent_given_tools_field_returns_tool_calls_passthrough():
     client = _client_for(run)
 
     response = client.post(
-        "/v1/agents/researcher",
-        json={
-            "messages": [{"role": "user", "content": "what time is it?"}],
-            "tools": ["get_current_time"],
-        },
+        "/v1/agents/researcher", json={"message": "what time is it?", "tools": ["get_current_time"]}
     )
 
     assert response.status_code == 200

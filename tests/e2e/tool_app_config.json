@@ -9,11 +9,17 @@
       "name": "get_current_time"
     }
   ],
+  "strategies": [
+    {
+      "name": "react"
+    }
+  ],
   "agents": [
     {
       "name": "clock-bot",
       "system_prompt": "You have access to a get_current_time tool. Always call it when asked about the time.",
-      "default_llm": "openai/gpt-4o-mini",
+      "model": "openai/gpt-4o-mini",
+      "strategy": "react",
       "tools": [
         "get_current_time"
       ]

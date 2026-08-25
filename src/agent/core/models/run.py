@@ -12,7 +12,6 @@ class Run(BaseModel):
     model: str = Field(
         description="The litellm-format provider/model string used for this execution."
     )
-    request: list[Message] = Field(description="The messages sent to the LLM.")
     response: Message = Field(description="The LLM's reply message.")
     usage: Usage = Field(description="Token usage for this execution.")
     finish_reason: str = Field(

@@ -12,16 +12,23 @@
       "name": "get_current_time"
     }
   ],
+  "strategies": [
+    {
+      "name": "react"
+    }
+  ],
   "agents": [
     {
       "name": "researcher",
       "system_prompt": "You are a careful, concise research assistant.",
-      "default_llm": "anthropic/claude-3-5-haiku-20241022",
+      "model": "anthropic/claude-3-5-haiku-20241022",
+      "strategy": "react",
       "tools": [
         "get_current_time"
       ]
     }
   ],
+  "base_prompt": "Always respond in plain, professional English.",
   "logging": {
     "level": "INFO"
   }
