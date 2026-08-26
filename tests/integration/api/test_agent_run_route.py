@@ -1,0 +1,296 @@
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from agent.api.app import add_agent_run_route, add_exception_handlers
+from agent.core.exceptions import (
+    AgentError,
+    AgentNotFoundError,
+    LLMError,
+    LLMNotFoundError,
+    LLMRateLimitedError,
+    LLMTimeoutError,
+    SessionNotFoundError,
+    StrategyNotFoundError,
+    ToolNotFoundError,
+)
+from agent.core.models.message import Message, ToolCall, ToolCallFunction
+from agent.core.models.run import Run
+from agent.core.models.usage import Usage
+from agent.core.services.agent_run import AgentRunService
+
+
+class _StubAgentRunService(AgentRunService):
+    def __init__(self, result: Run | Exception) -> None:
+        self._result = result
+        self.last_agent: str | None = None
+        self.last_message: str | None = None
+        self.last_strategy: str | None = None
+        self.last_session_id: str | None = None
+
+    async def run(
+        self,
+        message: str,
+        agent: str,
+        *,
+        model: str | None = None,
+        strategy: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[str] | None = None,
+        session_id: str | None = None,
+    ) -> Run:
+        self.last_agent = agent
+        self.last_message = message
+        self.last_strategy = strategy
+        self.last_session_id = session_id
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def _run(finish_reason: str = "stop", session_id: str = "sess_1") -> Run:
+    return Run(
+        model="openai/gpt-4o",
+        response=Message(role="assistant", content="hello!"),
+        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        finish_reason=finish_reason,
+        session_id=session_id,
+    )
+
+
+def _client_for(result: Run | Exception) -> TestClient:
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, _StubAgentRunService(result))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_run_agent_given_success_returns_200_with_message():
+    client = _client_for(_run())
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "openai/gpt-4o"
+    assert body["message"]["content"] == "hello!"
+    assert body["usage"]["total_tokens"] == 2
+    assert body["finish_reason"] == "stop"
+    assert body["message"]["tool_calls"] is None
+    assert body["session_id"] == "sess_1"
+
+
+def test_run_agent_uses_the_path_segment_as_the_agent_name():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert service.last_agent == "researcher"
+
+
+def test_run_agent_passes_the_body_message_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "what time is it?"})
+
+    assert service.last_message == "what time is it?"
+
+
+def test_run_agent_passes_the_body_strategy_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi", "strategy": "rewoo"})
+
+    assert service.last_strategy == "rewoo"
+
+
+def test_run_agent_passes_the_body_session_id_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi", "session_id": "sess_9"})
+
+    assert service.last_session_id == "sess_9"
+
+
+def test_run_agent_given_no_session_id_in_body_passes_none_through():
+    service = _StubAgentRunService(_run())
+    app = FastAPI()
+    add_exception_handlers(app)
+    add_agent_run_route(app, service)
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert service.last_session_id is None
+
+
+def test_run_agent_given_non_stop_finish_reason_is_not_hardcoded():
+    client = _client_for(_run(finish_reason="length"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.json()["finish_reason"] == "length"
+
+
+def test_run_agent_given_unknown_agent_returns_404():
+    client = _client_for(AgentNotFoundError("nope"))
+
+    response = client.post("/v1/agents/nope", json={"message": "hi"})
+
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["message"] == "nope"
+    assert detail["code"] == "agent_not_found"
+
+
+def test_run_agent_given_unknown_model_override_returns_404():
+    client = _client_for(LLMNotFoundError("nope/nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "model": "nope/nope"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "model_not_found"
+
+
+def test_run_agent_given_unknown_strategy_override_returns_404():
+    client = _client_for(StrategyNotFoundError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "strategy": "nope"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "strategy_not_found"
+
+
+def test_run_agent_given_unknown_tool_returns_404():
+    client = _client_for(ToolNotFoundError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi", "tools": ["nope"]})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "tool_not_found"
+
+
+def test_run_agent_given_unknown_session_id_returns_404():
+    client = _client_for(SessionNotFoundError("nope"))
+
+    response = client.post(
+        "/v1/agents/researcher", json={"message": "hi", "session_id": "does-not-exist"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"
+
+
+def test_run_agent_given_llm_failure_returns_502():
+    client = _client_for(LLMError("provider down"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["message"] == "provider down"
+
+
+def test_run_agent_given_rate_limited_error_returns_429():
+    client = _client_for(LLMRateLimitedError("rate limited"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 429
+
+
+def test_run_agent_given_timeout_error_returns_504():
+    client = _client_for(LLMTimeoutError("timed out"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 504
+
+
+def test_run_agent_given_generic_agent_error_returns_500():
+    client = _client_for(AgentError("something unexpected"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["message"] == "something unexpected"
+
+
+def test_run_agent_given_missing_message_field_returns_400():
+    client = _client_for(_run())
+
+    response = client.post("/v1/agents/researcher", json={})
+
+    assert response.status_code == 400
+    assert "param" in response.json()["detail"]
+
+
+def test_run_agent_given_unexpected_exception_returns_500():
+    client = _client_for(RuntimeError("boom"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["message"] == "boom"
+
+
+def test_run_agent_given_tool_calls_message_serializes_correctly():
+    run = Run(
+        model="openai/gpt-4o",
+        response=Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    function=ToolCallFunction(name="get_current_time", arguments="{}"),
+                )
+            ],
+        ),
+        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        finish_reason="tool_calls",
+        session_id="sess_1",
+    )
+    client = _client_for(run)
+
+    response = client.post(
+        "/v1/agents/researcher", json={"message": "what time is it?", "tools": ["get_current_time"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["finish_reason"] == "tool_calls"
+    assert body["message"]["content"] is None
+    assert body["message"]["tool_calls"][0]["function"]["name"] == "get_current_time"
+
+
+def test_unmatched_route_returns_404():
+    client = _client_for(_run())
+
+    response = client.get("/does-not-exist")
+
+    assert response.status_code == 404
+
+
+def test_wrong_http_method_returns_405():
+    client = _client_for(_run())
+
+    response = client.get("/v1/agents/researcher")
+
+    assert response.status_code == 405

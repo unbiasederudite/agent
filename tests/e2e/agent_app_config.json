@@ -1,0 +1,29 @@
+{
+  "llms": [
+    {
+      "model": "openai/gpt-4o-mini"
+    }
+  ],
+  "strategies": [
+    {
+      "name": "react"
+    }
+  ],
+  "agents": [
+    {
+      "name": "pong-bot",
+      "system_prompt": "You always reply with exactly the word: pong",
+      "model": "openai/gpt-4o-mini",
+      "strategy": "react"
+    },
+    {
+      "name": "memory-bot",
+      "system_prompt": "You are a helpful assistant with a good memory. Answer concisely.",
+      "model": "openai/gpt-4o-mini",
+      "strategy": "react"
+    }
+  ],
+  "logging": {
+    "level": "INFO"
+  }
+}
