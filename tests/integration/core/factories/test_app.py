@@ -24,15 +24,21 @@ def test_build_given_valid_config_registers_llm(tmp_path: Path):
     config_path = tmp_path / "app_config.json"
     config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o"}]}))
 
-    llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt = build_registries(
-        config_path
-    )
+    (
+        llm_registry,
+        agent_registry,
+        tool_registry,
+        strategy_registry,
+        base_prompt,
+        compaction_config,
+    ) = build_registries(config_path)
 
     assert llm_registry.get("openai/gpt-4o") is not None
     assert agent_registry is not None
     assert tool_registry is not None
     assert strategy_registry is not None
     assert base_prompt is None
+    assert compaction_config is None
 
 
 def test_build_given_base_prompt_returns_it(tmp_path: Path):
@@ -41,7 +47,7 @@ def test_build_given_base_prompt_returns_it(tmp_path: Path):
         json.dumps({"llms": [{"model": "openai/gpt-4o"}], "base_prompt": "House style."})
     )
 
-    _, _, _, _, base_prompt = build_registries(config_path)
+    _, _, _, _, base_prompt, _ = build_registries(config_path)
 
     assert base_prompt == "House style."
 
@@ -83,7 +89,7 @@ def test_build_given_valid_agent_registers_agent(tmp_path: Path):
         )
     )
 
-    _, agent_registry, _, _, _ = build_registries(config_path)
+    _, agent_registry, _, _, _, _ = build_registries(config_path)
 
     assert agent_registry.get("researcher").model == "openai/gpt-4o"
 
@@ -149,11 +155,25 @@ async def test_build_given_llm_sampling_defaults_wires_adapter_with_them(
     config_path = tmp_path / "app_config.json"
     config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o", "temperature": 0.2}]}))
 
-    llm_registry, _, _, _, _ = build_registries(config_path)
+    llm_registry, _, _, _, _, _ = build_registries(config_path)
     await llm_registry.get("openai/gpt-4o").complete([Message(role="user", content="hi")])
 
     _, kwargs = mock_acompletion.call_args
     assert kwargs["temperature"] == 0.2
+
+
+def test_build_given_context_window_wires_adapter_with_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.get_model_info", lambda model: {"max_input_tokens": 128000})
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps({"llms": [{"model": "openai/gpt-4o", "context_window": 32000}]})
+    )
+
+    llm_registry, _, _, _, _, _ = build_registries(config_path)
+
+    assert llm_registry.get("openai/gpt-4o").max_input_tokens() == 32000
 
 
 def test_build_given_valid_tool_registers_tool(tmp_path: Path):
@@ -162,7 +182,7 @@ def test_build_given_valid_tool_registers_tool(tmp_path: Path):
         json.dumps({"llms": [{"model": "openai/gpt-4o"}], "tools": [{"name": "get_current_time"}]})
     )
 
-    _, _, tool_registry, _, _ = build_registries(config_path)
+    _, _, tool_registry, _, _, _ = build_registries(config_path)
 
     assert tool_registry.get("get_current_time") is not None
 
@@ -198,7 +218,7 @@ def test_build_given_valid_strategy_registers_strategy(tmp_path: Path):
         json.dumps({"llms": [{"model": "openai/gpt-4o"}], "strategies": [{"name": "react"}]})
     )
 
-    _, _, _, strategy_registry, _ = build_registries(config_path)
+    _, _, _, strategy_registry, _, _ = build_registries(config_path)
 
     assert strategy_registry.get("react") is not None
 
@@ -207,7 +227,7 @@ def test_build_given_no_strategies_declared_registers_none(tmp_path: Path):
     config_path = tmp_path / "app_config.json"
     config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o"}]}))
 
-    _, _, _, strategy_registry, _ = build_registries(config_path)
+    _, _, _, strategy_registry, _, _ = build_registries(config_path)
 
     assert strategy_registry.all() == {}
 
@@ -268,7 +288,7 @@ def test_build_given_agent_declared_tool_registers_agent(tmp_path: Path):
         )
     )
 
-    _, agent_registry, _, _, _ = build_registries(config_path)
+    _, agent_registry, _, _, _, _ = build_registries(config_path)
 
     assert agent_registry.get("researcher").tools == ["get_current_time"]
 
@@ -310,7 +330,49 @@ def test_build_given_two_agents_share_a_tool_registers_both(tmp_path: Path):
         )
     )
 
-    _, agent_registry, _, _, _ = build_registries(config_path)
+    _, agent_registry, _, _, _, _ = build_registries(config_path)
 
     assert agent_registry.get("researcher").tools == ["get_current_time"]
     assert agent_registry.get("scheduler").tools == ["get_current_time"]
+
+
+def test_build_given_no_compaction_returns_none(tmp_path: Path):
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o"}]}))
+
+    _, _, _, _, _, compaction_config = build_registries(config_path)
+
+    assert compaction_config is None
+
+
+def test_build_given_compaction_with_declared_model_returns_it(tmp_path: Path):
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "compaction": {"model": "openai/gpt-4o", "token_budget_pct": 0.7},
+            }
+        )
+    )
+
+    _, _, _, _, _, compaction_config = build_registries(config_path)
+
+    assert compaction_config is not None
+    assert compaction_config.model == "openai/gpt-4o"
+    assert compaction_config.token_budget_pct == 0.7
+
+
+def test_build_given_compaction_unknown_model_raises_config_error(tmp_path: Path):
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "compaction": {"model": "openai/does-not-exist"},
+            }
+        )
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config_path)

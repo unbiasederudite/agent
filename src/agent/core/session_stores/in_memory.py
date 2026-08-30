@@ -45,3 +45,14 @@ class InMemorySessionStore:
         if key not in self._sessions:
             raise SessionNotFoundError(f"no session '{session_id}' for agent '{agent}'")
         self._sessions[key].extend(messages)
+
+    async def replace(self, agent: str, session_id: str, messages: list[Message]) -> None:
+        """Overwrite the stored history for `(agent, session_id)` with `messages` entirely.
+
+        Raises:
+            SessionNotFoundError: if no session exists for this exact pair.
+        """
+        key = (agent, session_id)
+        if key not in self._sessions:
+            raise SessionNotFoundError(f"no session '{session_id}' for agent '{agent}'")
+        self._sessions[key] = list(messages)

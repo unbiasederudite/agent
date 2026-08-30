@@ -76,3 +76,22 @@ async def test_sessions_under_different_agents_are_independent():
 
     assert await store.get("researcher", researcher_id) == [Message(role="user", content="a")]
     assert await store.get("scheduler", scheduler_id) == []
+
+
+async def test_replace_overwrites_existing_history():
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    await store.append("researcher", session_id, [Message(role="user", content="old")])
+
+    await store.replace("researcher", session_id, [Message(role="assistant", content="summary")])
+
+    assert await store.get("researcher", session_id) == [
+        Message(role="assistant", content="summary")
+    ]
+
+
+async def test_replace_given_unknown_session_id_raises_session_not_found_error():
+    store = InMemorySessionStore()
+
+    with pytest.raises(SessionNotFoundError):
+        await store.replace("researcher", "does-not-exist", [Message(role="user", content="hi")])

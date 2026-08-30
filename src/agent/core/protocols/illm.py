@@ -24,5 +24,22 @@ class ILLM(Protocol):
         if given, is a list of OpenAI-format function schemas offered to the LLM; the LLM
         may respond with `tool_calls` on the returned `Completion.message` instead of (or
         without) `content` -- this call never executes them.
+
+        Contractual requirement on implementations: a request declaring no `tools` must never
+        carry `role="tool"` messages or `tool_calls`-bearing messages (Bedrock's Converse API
+        rejects such a request outright), so an implementation folds any such content out of
+        `messages` itself -- e.g. via `flatten_tool_exchanges_for_no_tools_request` in
+        `core/models/message.py`. Callers may therefore always pass real, un-pre-processed
+        history, whether or not this particular call declares tools.
+        """
+        ...
+
+    def max_input_tokens(self) -> int:
+        """Return this model's maximum input token count.
+
+        Not async -- a local model-data lookup, no network call.
+
+        Raises:
+            LLMError: if the underlying provider has no known limit for this model.
         """
         ...

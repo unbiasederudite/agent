@@ -62,3 +62,48 @@ class Message(BaseModel):
         elif self.content is None and not self.tool_calls:
             raise ValueError("either `content` or `tool_calls` must be given")
         return self
+
+
+def flatten_tool_exchanges_for_no_tools_request(messages: list[Message]) -> list[Message]:
+    """Fold each turn's tool exchange into that turn's own final assistant message.
+
+    Makes a message list safe to send to any request that declares no `tools` -- Bedrock's
+    Converse API rejects toolUse / toolResult content blocks outright when `toolConfig` is
+    absent, even for messages merely replaying a prior exchange, so no `role="tool"` message
+    and no message carrying `tool_calls` may reach such a request. Each tool-call request and
+    tool result becomes a readable note folded into the next assistant message the turn
+    produces, which also keeps the strict user/assistant alternation Anthropic-via-Bedrock
+    still requires.
+
+    Args:
+        messages: The message list to fold.
+
+    Returns:
+        An equivalent list with no `role="tool"` message and no `tool_calls`.
+    """
+    flattened: list[Message] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        if pending:
+            flattened.append(Message(role="assistant", content="\n".join(pending)))
+            pending.clear()
+
+    for message in messages:
+        if message.role == "tool":
+            pending.append(f"[tool {message.name!r} returned: {message.content}]")
+        elif message.tool_calls:
+            if message.content:
+                pending.append(message.content)
+            pending.extend(
+                f"[called tool {call.function.name!r} with {call.function.arguments}]"
+                for call in message.tool_calls
+            )
+        elif message.role == "assistant":
+            pending.append(message.content or "")
+            flush()
+        else:
+            flush()
+            flattened.append(message)
+    flush()
+    return flattened

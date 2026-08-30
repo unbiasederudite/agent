@@ -26,7 +26,10 @@ cp .env.example .env
 `config.json` declares which litellm-format `provider/model` strings are allowed, and the
 agents (see Endpoints below) available to route requests through;
 `.env` holds the API key(s) litellm reads automatically based on each model's provider
-prefix.
+prefix. An optional top-level `compaction` block keeps a session's stored history under a
+token budget by summarizing its older portion once it grows too large -- see
+`config.example.json` and `src/agent/core/models/README.md` for its fields; omit it entirely
+to disable the feature.
 
 Then start the API:
 
@@ -45,3 +48,20 @@ uv run python -m agent.api --config config.json
 | `GET` | `/v1/tools` | List registered tools: `name`, `description`, `parameters` (JSON schema). |
 | `GET` | `/v1/models` | List registered model id strings. |
 | `GET` | `/v1/strategies` | List registered reasoning strategy names (valid values for `strategy`). |
+
+## Errors
+
+Every error response body is `{"detail": {"message": "...", "code": "..."}}` (validation
+errors from FastAPI itself, and the 500 catch-all, omit `code`). Notable `code` values on
+`POST /v1/agents/{agent_name}`:
+
+| Status | `code` | Meaning |
+|---|---|---|
+| 404 | `agent_not_found` / `model_not_found` / `strategy_not_found` / `session_not_found` / `tool_not_found` | The named resource isn't registered (or, for `session_not_found`, doesn't belong to this agent). |
+| 400 | `input_too_large` | `message` exceeds the agent's configured `max_input_chars`. |
+| 429 | *(none)* | The provider rate-limited the request. |
+| 504 | *(none)* | The provider request timed out. |
+| 502 | `context_window_exceeded` | The request overflowed the model's context window and compaction was never available to try (not configured, or a brand-new session with no history to compact). |
+| 502 | `compaction_exhausted` | The request overflowed and compaction *was* tried but couldn't help -- see `CompactionExhaustedError`'s docstring for what that does and doesn't mean for the session's stored history afterward. |
+| 502 | *(none)* | Any other underlying LLM call failure. |
+| 500 | *(none)* | An otherwise-unhandled `AgentError`, or any unexpected exception. |

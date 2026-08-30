@@ -15,6 +15,9 @@ from agent.api.schemas import (
 from agent.core.exceptions import (
     AgentError,
     AgentNotFoundError,
+    CompactionExhaustedError,
+    InputTooLargeError,
+    LLMContextWindowExceededError,
     LLMError,
     LLMNotFoundError,
     LLMRateLimitedError,
@@ -29,6 +32,7 @@ from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
 from agent.core.services.agent_run import AgentRunService
+from agent.core.services.compaction import CompactionService
 from agent.core.session_stores.in_memory import InMemorySessionStore
 
 
@@ -94,10 +98,26 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
             raise HTTPException(
                 status_code=404, detail={"message": str(exc), "code": "tool_not_found"}
             ) from exc
+        except InputTooLargeError as exc:
+            raise HTTPException(
+                status_code=400, detail={"message": str(exc), "code": "input_too_large"}
+            ) from exc
         except LLMRateLimitedError as exc:
             raise HTTPException(status_code=429, detail={"message": str(exc)}) from exc
         except LLMTimeoutError as exc:
             raise HTTPException(status_code=504, detail={"message": str(exc)}) from exc
+        except CompactionExhaustedError as exc:
+            # Must stay above the generic overflow handler below: this subclasses it, and
+            # `except` clauses are checked in order -- reversed, this one is unreachable.
+            raise HTTPException(
+                status_code=502,
+                detail={"message": str(exc), "code": "compaction_exhausted"},
+            ) from exc
+        except LLMContextWindowExceededError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"message": str(exc), "code": "context_window_exceeded"},
+            ) from exc
         except LLMError as exc:
             raise HTTPException(status_code=502, detail={"message": str(exc)}) from exc
         except AgentError as exc:
@@ -151,12 +171,28 @@ def add_registry_routes(
 
 def create_app(config_path: Path) -> FastAPI:
     """Build the FastAPI app, wired from the AppConfig JSON at `config_path`."""
-    llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt = build_registries(
-        config_path
-    )
+    (
+        llm_registry,
+        agent_registry,
+        tool_registry,
+        strategy_registry,
+        base_prompt,
+        compaction_config,
+    ) = build_registries(config_path)
     session_store = InMemorySessionStore()
+    compaction_service = (
+        CompactionService(llm_registry, session_store, compaction_config)
+        if compaction_config is not None
+        else None
+    )
     agent_run_service = AgentRunService(
-        llm_registry, agent_registry, tool_registry, strategy_registry, base_prompt, session_store
+        llm_registry,
+        agent_registry,
+        tool_registry,
+        strategy_registry,
+        base_prompt,
+        session_store,
+        compaction_service,
     )
 
     app = FastAPI()

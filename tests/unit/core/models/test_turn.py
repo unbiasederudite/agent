@@ -15,7 +15,7 @@ def _usage() -> Usage:
 def test_turn_message_given_single_message_returns_it():
     final = Message(role="assistant", content="done")
 
-    turn = Turn(messages=[final], usage=_usage(), finish_reason="stop")
+    turn = Turn(messages=[final], usage=_usage(), finish_reason="stop", final_total_tokens=2)
 
     assert turn.message == final
 
@@ -30,7 +30,10 @@ def test_turn_message_given_multiple_messages_returns_the_last_one():
     final = Message(role="assistant", content="done")
 
     turn = Turn(
-        messages=[tool_call_message, tool_result, final], usage=_usage(), finish_reason="stop"
+        messages=[tool_call_message, tool_result, final],
+        usage=_usage(),
+        finish_reason="stop",
+        final_total_tokens=2,
     )
 
     assert turn.message == final
@@ -40,11 +43,12 @@ def test_turn_message_given_multiple_messages_returns_the_last_one():
 def test_turn_given_fields_constructs():
     final = Message(role="assistant", content="done")
 
-    turn = Turn(messages=[final], usage=_usage(), finish_reason="length")
+    turn = Turn(messages=[final], usage=_usage(), finish_reason="length", final_total_tokens=2)
 
     assert turn.messages == [final]
     assert turn.usage.total_tokens == 2
     assert turn.finish_reason == "length"
+    assert turn.final_total_tokens == 2
 
 
 def test_turn_given_empty_messages_raises_validation_error():

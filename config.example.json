@@ -1,10 +1,10 @@
 {
   "llms": [
     {
-      "model": "anthropic/claude-3-5-haiku-20241022"
-    },
-    {
-      "model": "openai/gpt-4o"
+      "model": "anthropic/claude-3-5-haiku-20241022",
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "max_tokens": 2000
     }
   ],
   "tools": [
@@ -25,10 +25,25 @@
       "strategy": "react",
       "tools": [
         "get_current_time"
-      ]
+      ],
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "max_tokens": 2000,
+      "max_tool_iterations": 10,
+      "max_tool_result_chars": 4000,
+      "max_tool_calls_per_round": 5,
+      "max_tool_results_total_chars": 20000,
+      "max_input_chars": 20000
     }
   ],
   "base_prompt": "Always respond in plain, professional English.",
+  "compaction": {
+    "model": "anthropic/claude-3-5-haiku-20241022",
+    "token_budget_pct": 0.8,
+    "keep_recent_turns": 4,
+    "chunk_turns": 4,
+    "prompt": "Summarize the conversation above concisely. Preserve the task's goal, key decisions, established constraints, and any facts or results later turns may need to reference. Omit small talk and resolved intermediate steps."
+  },
   "logging": {
     "level": "INFO"
   }

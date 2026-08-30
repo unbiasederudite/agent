@@ -11,6 +11,7 @@ from agent.core.exceptions import ConfigError
 from agent.core.models.config import (
     AgentConfig,
     AppConfig,
+    CompactionConfig,
     LLMConfig,
     StrategyConfig,
     ToolConfig,
@@ -34,22 +35,21 @@ _STRATEGY_IMPLEMENTATIONS: dict[str, Callable[[], IStrategy]] = {
 
 
 def _build_llm_registry(llm_configs: list[LLMConfig]) -> tuple[LLMRegistry, set[str]]:
-    """Build the LLM registry, raising ConfigError on a duplicate model."""
+    """Build the LLM registry, raising ConfigError on a duplicate model name."""
     llm_registry = LLMRegistry()
     seen_models: set[str] = set()
     for llm_config in llm_configs:
         if llm_config.model in seen_models:
             raise ConfigError(f"duplicate LLM model in config: {llm_config.model}")
         seen_models.add(llm_config.model)
-        llm_registry.register(
+        adapter = LiteLLMAdapter(
             llm_config.model,
-            LiteLLMAdapter(
-                llm_config.model,
-                temperature=llm_config.temperature,
-                top_p=llm_config.top_p,
-                max_tokens=llm_config.max_tokens,
-            ),
+            temperature=llm_config.temperature,
+            top_p=llm_config.top_p,
+            max_tokens=llm_config.max_tokens,
+            context_window=llm_config.context_window,
         )
+        llm_registry.register(llm_config.model, adapter)
     return llm_registry, seen_models
 
 
@@ -121,16 +121,28 @@ def _build_agent_registry(
 
 def build_registries(
     config_path: Path,
-) -> tuple[LLMRegistry, AgentRegistry, ToolRegistry, StrategyRegistry, str | None]:
-    """Load AppConfig from `config_path` and return populated registries and `base_prompt`.
+) -> tuple[
+    LLMRegistry,
+    AgentRegistry,
+    ToolRegistry,
+    StrategyRegistry,
+    str | None,
+    CompactionConfig | None,
+]:
+    """Load AppConfig from `config_path` and return populated registries plus raw config.
+
+    Returns the registries, `base_prompt`, and the raw `compaction` config. `create_app()`
+    builds `CompactionService` from the raw config, since that also needs `session_store`,
+    a process-level object with no config surface of its own.
 
     Raises:
         ConfigError: if the file is missing, not valid JSON, fails AppConfig validation,
             declares a duplicate LLM model, agent name, tool name, or strategy name, an
-            agent's `model` doesn't match any configured LLM, an agent's `strategy`
-            doesn't match any configured strategy, an agent's `tools` entry doesn't match
-            any configured tool or repeats a tool name, or a configured tool or strategy
-            name has no matching code-level implementation.
+            agent's `model` doesn't match any configured LLM, an agent's `strategy` doesn't
+            match any configured strategy, an agent's `tools` entry doesn't match any
+            configured tool or repeats a tool name, a configured tool or strategy name has
+            no matching code-level implementation, or `compaction.model` doesn't match any
+            configured LLM.
     """
     try:
         config = AppConfig.model_validate_json(config_path.read_bytes())
@@ -145,5 +157,14 @@ def build_registries(
     agent_registry = _build_agent_registry(
         config.agents, known_models, known_tools, known_strategies
     )
+    if config.compaction is not None and config.compaction.model not in known_models:
+        raise ConfigError(f"compaction declares unknown model: {config.compaction.model}")
 
-    return llm_registry, agent_registry, tool_registry, strategy_registry, config.base_prompt
+    return (
+        llm_registry,
+        agent_registry,
+        tool_registry,
+        strategy_registry,
+        config.base_prompt,
+        config.compaction,
+    )

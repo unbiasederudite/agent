@@ -23,6 +23,15 @@ class Turn(BaseModel):
         ),
     )
     usage: Usage = Field(description="Token usage summed across every LLM call this run made.")
+    final_total_tokens: int = Field(
+        description=(
+            "total_tokens of the last individual LLM call this run made -- not summed like "
+            "usage. Once this turn's messages are appended to session history, this number "
+            "is the token footprint of that full history: the last call's prompt already "
+            "contained everything before it, and its completion is exactly what gets "
+            "appended after it."
+        )
+    )
     finish_reason: str = Field(
         description=(
             "The finish_reason of whichever LLM call produced the final message -- never "

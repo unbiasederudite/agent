@@ -35,3 +35,11 @@ class ISessionStore(Protocol):
             SessionNotFoundError: same condition as `get`.
         """
         ...
+
+    async def replace(self, agent: str, session_id: str, messages: list[Message]) -> None:
+        """Overwrite the stored history for `(agent, session_id)` with `messages` entirely.
+
+        Raises:
+            SessionNotFoundError: same condition as `get`.
+        """
+        ...
