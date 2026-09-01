@@ -12,8 +12,8 @@ class ToolCallFunction(BaseModel):
     arguments: str = Field(
         description=(
             "Raw JSON string of arguments. The executing IStrategy parses this with "
-            "json.loads, but nothing validates the result against the tool's declared "
-            "`ITool.parameters` schema."
+            "json.loads and validates the result against the tool's declared "
+            "`ITool.parameters_model` before invoking it."
         )
     )
 

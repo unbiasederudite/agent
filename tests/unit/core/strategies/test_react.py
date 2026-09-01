@@ -1,10 +1,12 @@
 """Tests for ReactStrategy -- the ReAct tool-calling loop."""
 
 import asyncio
+import json
 import logging
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from agent.core.models.completion import Completion
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
@@ -40,19 +42,28 @@ class _FakeLLM:
         return self._completions[len(self.calls) - 1]
 
 
+class _EchoParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str
+
+
 class _EchoTool:
     name = "echo"
     description = "Echoes its input."
-    parameters: dict[str, Any] = {"type": "object", "properties": {"value": {"type": "string"}}}
+    parameters_model: type[BaseModel] = _EchoParams
 
     async def execute(self, **kwargs: Any) -> str:
         return str(kwargs["value"])
 
 
+class _EmptyParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class _RaisingTool:
     name = "boom"
     description = "Always raises."
-    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    parameters_model: type[BaseModel] = _EmptyParams
 
     async def execute(self, **kwargs: Any) -> str:
         raise RuntimeError("tool exploded")
@@ -63,7 +74,7 @@ class _ConcurrentTool:
 
     name = "slow"
     description = "Sleeps briefly to prove concurrent execution."
-    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+    parameters_model: type[BaseModel] = _EmptyParams
 
     def __init__(self, counter: list[int], max_seen: list[int]) -> None:
         self._counter = counter
@@ -140,6 +151,25 @@ async def test_run_given_one_tool_call_executes_it_and_calls_llm_again():
         role="tool", tool_call_id="call_1", name="echo", content="hi"
     )
     assert second_call_messages[-2].tool_calls == [_call("call_1", "echo", '{"value": "hi"}')]
+
+
+async def test_run_given_tools_declares_schema_derived_from_parameters_model():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="hi")], llm, tools, max_iterations=10)
+
+    assert llm.calls[0]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echoes its input.",
+                "parameters": _EchoParams.model_json_schema(),
+            },
+        }
+    ]
 
 
 async def test_run_given_one_tool_call_turn_messages_is_the_full_generated_delta():
@@ -1014,3 +1044,206 @@ async def test_run_given_multiple_iterations_logs_debug_once_per_iteration(
 
     calling_lines = [r for r in caplog.records if "calling" in r.message.lower()]
     assert len(calling_lines) == 2  # once per llm.complete() call, including this one's success
+
+
+async def test_run_given_missing_required_argument_returns_validation_error_content():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "echo", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content == "Error: invalid arguments: value: Field required"
+    assert turn.message.content == "final answer"
+
+
+async def test_run_given_wrong_type_argument_returns_validation_error_content():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "echo", '{"value": 5}')]), _final_completion()]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert (
+        result_message.content == "Error: invalid arguments: value: Input should be a valid string"
+    )
+
+
+async def test_run_given_extra_argument_returns_validation_error_content():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [
+            _tool_call_completion([_call("call_1", "echo", '{"value": "hi", "extra": "x"}')]),
+            _final_completion(),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert (
+        result_message.content == "Error: invalid arguments: extra: Extra inputs are not permitted"
+    )
+
+
+async def test_run_given_valid_arguments_executes_normally():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "echo", '{"value": "hi"}')]), _final_completion()]
+    )
+    strategy = ReactStrategy()
+
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content == "hi"
+    assert turn.message.content == "final answer"
+
+
+async def test_run_given_valid_arguments_execute_receives_the_validated_value():
+    # Proves execute() gets validated.model_dump(), not the raw parsed JSON -- a default
+    # the caller never supplied must still reach execute() as an explicit kwarg.
+    class _DefaultingParams(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        value: str = "default"
+
+    class _DefaultingTool:
+        name = "defaulting"
+        description = "Returns its value argument, or a default."
+        parameters_model: type[BaseModel] = _DefaultingParams
+        received: dict[str, Any] | None = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            self.received = kwargs
+            return kwargs["value"]
+
+    tool = _DefaultingTool()
+    tools: dict[str, ITool] = {"defaulting": tool}
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "defaulting", "{}")]), _final_completion()]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert tool.received == {"value": "default"}
+
+
+async def test_run_given_validation_error_is_not_truncated_even_with_small_max_tool_result_chars():  # noqa: E501
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "echo", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run(
+        [Message(role="user", content="go")],
+        llm,
+        tools,
+        max_iterations=10,
+        max_tool_result_chars=1,
+    )
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content == "Error: invalid arguments: value: Field required"
+
+
+async def test_run_given_validation_error_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "echo", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert any("validation" in r.message for r in caplog.records)
+
+
+async def test_run_given_validator_raises_non_validation_error_returns_error_content():
+    class _ExplodingParams(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        value: str
+
+        @field_validator("value")
+        @classmethod
+        def _explode(cls, v: str) -> str:
+            raise KeyError("boom")
+
+    class _ExplodingValidatorTool:
+        name = "exploding_validator"
+        description = "A tool whose own validator raises something Pydantic doesn't wrap."
+        parameters_model: type[BaseModel] = _ExplodingParams
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "should never reach here"
+
+    tools: dict[str, ITool] = {"exploding_validator": _ExplodingValidatorTool()}
+    llm = _FakeLLM(
+        [
+            _tool_call_completion([_call("call_1", "exploding_validator", '{"value": "x"}')]),
+            _final_completion(),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content == "Error: invalid arguments for tool 'exploding_validator'"
+    assert turn.message.content == "final answer"
+
+
+async def test_run_given_many_extra_arguments_caps_the_error_count_shown():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    payload = {"value": "hi", **{f"extra_{i}": "x" for i in range(10)}}
+    llm = _FakeLLM(
+        [
+            _tool_call_completion([_call("call_1", "echo", json.dumps(payload))]),
+            _final_completion(),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content is not None
+    # 5 errors shown joined by "; " (4 separators) plus the "; ...and N more" suffix (1 more).
+    assert result_message.content.count(";") == 5
+    assert "...and 5 more error(s)" in result_message.content
+
+
+async def test_run_given_long_extra_argument_name_truncates_the_field_reference():
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    long_key = "x" * 300
+    llm = _FakeLLM(
+        [
+            _tool_call_completion(
+                [_call("call_1", "echo", json.dumps({"value": "hi", long_key: "y"}))]
+            ),
+            _final_completion(),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    result_message = llm.calls[1]["messages"][-1]
+    assert result_message.content is not None
+    assert "[truncated," in result_message.content
+
+
+async def test_run_given_validation_error_log_does_not_contain_pydantic_doc_url(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "echo", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert not any("errors.pydantic.dev" in r.message for r in caplog.records)

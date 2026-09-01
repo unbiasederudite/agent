@@ -268,7 +268,11 @@ def add_registry_routes(
         tools = tool_registry.all()
         logger.debug("listed tools: %d entries", len(tools))
         return [
-            ToolSummary(name=name, description=tool.description, parameters=tool.parameters)
+            ToolSummary(
+                name=name,
+                description=tool.description,
+                parameters=tool.parameters_model.model_json_schema(),
+            )
             for name, tool in tools.items()
         ]
 

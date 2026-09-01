@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from agent.core.models.message import Message, ToolCall
 from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage
@@ -15,6 +17,8 @@ from agent.core.protocols.itool import ITool
 logger = logging.getLogger(__name__)
 
 _OMITTED_MARKER = "Error: tool result omitted -- aggregate tool-output budget exhausted"
+_MAX_VALIDATION_ERRORS_SHOWN = 5
+_MAX_VALIDATION_FIELD_CHARS = 200
 
 
 def _tool_schema(tool: ITool) -> dict[str, Any]:
@@ -24,7 +28,7 @@ def _tool_schema(tool: ITool) -> dict[str, Any]:
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.parameters,
+            "parameters": tool.parameters_model.model_json_schema(),
         },
     }
 
@@ -86,6 +90,31 @@ def _tool_result_message(call: ToolCall, content: str) -> Message:
     return Message(role="tool", tool_call_id=call.id, name=call.function.name, content=content)
 
 
+def _format_validation_error(exc: ValidationError) -> str:
+    """Turn a ValidationError into a short "field: message" list for the LLM to read.
+
+    Pydantic's own str(exc) includes a per-error documentation URL, which is noise for an
+    error whose only audience is the LLM being asked to correct its own tool call. Bounded
+    internally (error count, and each field/message) rather than relying on
+    `max_tool_result_chars` -- unlike this function's sibling fixed error strings, this
+    content echoes back LLM-supplied field names and values, so it isn't actually short and
+    fixed without a cap of its own.
+    """
+    errors = exc.errors()
+    parts = []
+    for err in errors[:_MAX_VALIDATION_ERRORS_SHOWN]:
+        field = ".".join(str(loc) for loc in err["loc"]) or "(root)"
+        parts.append(
+            f"{_truncate(field, _MAX_VALIDATION_FIELD_CHARS)}: "
+            f"{_truncate(err['msg'], _MAX_VALIDATION_FIELD_CHARS)}"
+        )
+    message = "; ".join(parts)
+    omitted = len(errors) - _MAX_VALIDATION_ERRORS_SHOWN
+    if omitted > 0:
+        message += f"; ...and {omitted} more error(s)"
+    return message
+
+
 def _skipped_call_message(call: ToolCall, max_tool_calls_per_round: int) -> Message:
     """A fixed, non-truncated result for a tool call skipped by `max_tool_calls_per_round`.
 
@@ -104,12 +133,12 @@ async def _execute_call(
 ) -> Message:
     """Run one tool call and return its result as a role="tool" message.
 
-    Never raises -- any failure (a tool not offered for this call, bad JSON, the tool
-    itself raising, or a tool returning something that isn't a string) becomes the
-    message's error content instead, so the loop can keep going and the LLM can see and
-    react to the failure. `max_tool_result_chars` caps the tool-controlled content only
-    (the success result and the caught-exception message) -- our own short, fixed error
-    strings are never truncated.
+    Never raises -- any failure (a tool not offered for this call, bad JSON, arguments that
+    fail schema validation, the tool itself raising, or a tool returning something that
+    isn't a string) becomes the message's error content instead, so the loop can keep going
+    and the LLM can see and react to the failure. `max_tool_result_chars` caps the
+    tool-controlled content only (the success result and the caught-exception message) --
+    our own short, fixed error strings are never truncated.
     """
     name = call.function.name
     tool = tools.get(name)
@@ -124,10 +153,24 @@ async def _execute_call(
     if not isinstance(arguments, dict):
         logger.warning("tool '%s' call arguments were not a JSON object", name)
         return _tool_result_message(call, "Error: arguments must be a JSON object")
+    try:
+        validated = tool.parameters_model.model_validate(arguments)
+    except ValidationError as exc:
+        formatted = _format_validation_error(exc)
+        logger.warning("tool '%s' call failed argument validation: %s", name, formatted)
+        return _tool_result_message(call, f"Error: invalid arguments: {formatted}")
+    except Exception as exc:  # noqa: BLE001 -- a tool's own validator can raise anything
+        logger.warning(
+            "tool '%s' argument validation raised: %s",
+            name,
+            exc,
+            extra={"exception_type": type(exc).__name__},
+        )
+        return _tool_result_message(call, f"Error: invalid arguments for tool '{name}'")
     logger.info("executing tool '%s'", name)
     start = time.monotonic()
     try:
-        result = await tool.execute(**arguments)
+        result = await tool.execute(**validated.model_dump())
         duration_ms = (time.monotonic() - start) * 1000
         logger.info(
             "tool '%s' completed in %.1fms, result length %d", name, duration_ms, len(result)

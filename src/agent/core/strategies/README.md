@@ -33,7 +33,12 @@ Selected per-agent via `AgentConfig.strategy`, or per-request via `AgentRunReque
   If `AgentConfig.max_tool_result_chars` is set, a tool's result content (success or a
   caught tool-raised error) longer than that cap is truncated with a trailing marker before
   being fed back into the message list; the strategy's own short, fixed error strings
-  (unoffered tool, bad JSON, non-object arguments) are never truncated.
+  (unoffered tool, bad JSON, non-object arguments) are never truncated. A schema-validation
+  failure (the LLM's own arguments don't match the tool's `parameters_model`) is also never
+  truncated by this cap, but isn't "short and fixed" the same way -- it echoes back
+  LLM-supplied field names and values, so `_format_validation_error` bounds it internally
+  (capped error count, each field/message truncated) instead of relying on
+  `max_tool_result_chars`.
 
   If `AgentConfig.max_tool_calls_per_round` is set, only that many of one LLM response's tool
   calls actually execute -- the excess are skipped in the order the response listed them, each
