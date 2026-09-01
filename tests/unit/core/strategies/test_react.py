@@ -1,7 +1,10 @@
 """Tests for ReactStrategy -- the ReAct tool-calling loop."""
 
 import asyncio
+import logging
 from typing import Any
+
+import pytest
 
 from agent.core.models.completion import Completion
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
@@ -227,7 +230,7 @@ async def test_run_given_tool_raises_returns_error_content_and_continues():
     turn = await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
     result_message = llm.calls[1]["messages"][-1]
-    assert result_message.content == "Error: tool exploded"
+    assert result_message.content == "Error: tool 'boom' failed: tool exploded"
     assert turn.message.content == "final answer"
 
 
@@ -830,3 +833,184 @@ async def test_run_counts_the_per_call_truncated_length_not_the_original_toward_
 
     truncated = "x" * 10 + "\n...[truncated, 90 more characters]"
     assert [m.content for m in llm.calls[1]["messages"][-2:]] == [truncated, truncated]
+
+
+async def test_run_given_max_iterations_exhausted_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    always_calls_tool = _tool_call_completion([_call("call_1", "echo", '{"value": "x"}')])
+    llm = _FakeLLM([always_calls_tool, _final_completion("gave up")])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=1)
+
+    assert any("max_iterations" in r.message for r in caplog.records)
+
+
+async def test_run_given_unoffered_tool_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "missing", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, {}, max_iterations=10)
+
+    assert any("missing" in r.message for r in caplog.records)
+
+
+async def test_run_given_malformed_json_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "echo", "{not json")]), _final_completion()]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+async def test_run_given_tool_raises_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"boom": _RaisingTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "boom", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert any("boom" in r.message for r in caplog.records)
+
+
+async def test_run_given_tool_raises_logs_warning_with_exception_type(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"boom": _RaisingTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "boom", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    [record] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert record.exception_type == "RuntimeError"
+
+
+async def test_run_given_successful_tool_call_logs_info_start_and_completed(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM(
+        [_tool_call_completion([_call("call_1", "echo", '{"value": "hi"}')]), _final_completion()]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("executing" in r.message for r in info_records)
+    assert any("completed" in r.message for r in info_records)
+
+
+async def test_run_given_tool_raises_does_not_also_log_info_completed(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.DEBUG, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"boom": _RaisingTool()}
+    llm = _FakeLLM([_tool_call_completion([_call("call_1", "boom", "{}")]), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert not any(r.levelno == logging.INFO and "completed" in r.message for r in caplog.records)
+
+
+async def test_run_given_max_tool_calls_per_round_truncation_logs_info(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion(_three_echo_calls()), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run(
+        [Message(role="user", content="go")],
+        llm,
+        tools,
+        max_iterations=10,
+        max_tool_calls_per_round=2,
+    )
+
+    assert any(
+        r.levelno == logging.INFO and "max_tool_calls_per_round" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_run_given_max_tool_results_total_chars_truncation_logs_info(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    value = "x" * 50
+    llm = _FakeLLM(
+        [
+            _tool_call_completion(
+                [_call(f"call_{n}", "echo", f'{{"value": "{value}"}}') for n in (1, 2, 3)]
+            ),
+            _final_completion(),
+        ]
+    )
+    strategy = ReactStrategy()
+
+    await strategy.run(
+        [Message(role="user", content="go")],
+        llm,
+        tools,
+        max_iterations=10,
+        max_tool_results_total_chars=60,
+    )
+
+    assert any(r.levelno == logging.INFO and "budget" in r.message for r in caplog.records)
+
+
+async def test_run_given_no_truncation_does_not_log_info_about_it(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    llm = _FakeLLM([_tool_call_completion(_three_echo_calls()), _final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    assert not any(
+        "budget" in r.message or "max_tool_calls_per_round" in r.message for r in caplog.records
+    )
+
+
+async def test_run_given_no_tool_calls_logs_debug_calling_and_responded(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.DEBUG, logger="agent.core.strategies.react")
+    llm = _FakeLLM([_final_completion()])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="hi")], llm, {}, max_iterations=10)
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("calling" in r.message.lower() for r in debug_records)
+    assert any("responded" in r.message.lower() for r in debug_records)
+
+
+async def test_run_given_multiple_iterations_logs_debug_once_per_iteration(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.DEBUG, logger="agent.core.strategies.react")
+    tools: dict[str, ITool] = {"echo": _EchoTool()}
+    always_calls_tool = _tool_call_completion([_call("call_1", "echo", '{"value": "x"}')])
+    llm = _FakeLLM([always_calls_tool, _final_completion("done")])
+    strategy = ReactStrategy()
+
+    await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
+
+    calling_lines = [r for r in caplog.records if "calling" in r.message.lower()]
+    assert len(calling_lines) == 2  # once per llm.complete() call, including this one's success

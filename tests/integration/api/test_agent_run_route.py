@@ -1,16 +1,26 @@
+import logging
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent.api.app import add_agent_run_route, add_exception_handlers
+from agent.api.request_context import RequestIdMiddleware
 from agent.core.exceptions import (
     AgentError,
     AgentNotFoundError,
     LLMError,
     LLMNotFoundError,
+    LLMOverloadedError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    ModelNotAllowedError,
+    RequestTimeoutError,
+    SessionBusyError,
     SessionNotFoundError,
+    StrategyNotAllowedError,
     StrategyNotFoundError,
+    ToolNotAllowedError,
     ToolNotFoundError,
 )
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
@@ -61,6 +71,7 @@ def _run(finish_reason: str = "stop", session_id: str = "sess_1") -> Run:
 
 def _client_for(result: Run | Exception) -> TestClient:
     app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
     add_exception_handlers(app)
     add_agent_run_route(app, _StubAgentRunService(result))
     return TestClient(app, raise_server_exceptions=False)
@@ -204,7 +215,10 @@ def test_run_agent_given_llm_failure_returns_502():
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 502
-    assert response.json()["detail"]["message"] == "provider down"
+    detail = response.json()["detail"]
+    assert detail["message"] == "The request to the model provider failed. Please try again."
+    assert "provider down" not in detail["message"]
+    assert detail["request_id"]
 
 
 def test_run_agent_given_rate_limited_error_returns_429():
@@ -213,6 +227,14 @@ def test_run_agent_given_rate_limited_error_returns_429():
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 429
+
+
+def test_run_agent_given_rate_limited_error_sets_retry_after_header():
+    client = _client_for(LLMRateLimitedError("rate limited"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.headers["Retry-After"]
 
 
 def test_run_agent_given_timeout_error_returns_504():
@@ -229,7 +251,10 @@ def test_run_agent_given_generic_agent_error_returns_500():
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 500
-    assert response.json()["detail"]["message"] == "something unexpected"
+    detail = response.json()["detail"]
+    assert detail["message"] == "An unexpected error occurred."
+    assert "something unexpected" not in detail["message"]
+    assert detail["request_id"]
 
 
 def test_run_agent_given_missing_message_field_returns_400():
@@ -247,7 +272,10 @@ def test_run_agent_given_unexpected_exception_returns_500():
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 500
-    assert response.json()["detail"]["message"] == "boom"
+    detail = response.json()["detail"]
+    assert detail["message"] == "An unexpected error occurred."
+    assert "boom" not in detail["message"]
+    assert detail["request_id"]
 
 
 def test_run_agent_given_tool_calls_message_serializes_correctly():
@@ -286,6 +314,7 @@ def test_unmatched_route_returns_404():
     response = client.get("/does-not-exist")
 
     assert response.status_code == 404
+    assert response.json() == {"detail": {"message": "Not Found"}}
 
 
 def test_wrong_http_method_returns_405():
@@ -294,3 +323,153 @@ def test_wrong_http_method_returns_405():
     response = client.get("/v1/agents/researcher")
 
     assert response.status_code == 405
+    assert response.json() == {"detail": {"message": "Method Not Allowed"}}
+
+
+def test_run_agent_given_overloaded_error_returns_503():
+    client = _client_for(LLMOverloadedError("model at capacity"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]["message"]
+        == "This model is at capacity. Please try again shortly."
+    )
+
+
+def test_run_agent_given_overloaded_error_sets_retry_after_header():
+    client = _client_for(LLMOverloadedError("model at capacity"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.headers["Retry-After"]
+
+
+def test_run_agent_given_unknown_agent_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.api.app")
+    client = _client_for(AgentNotFoundError("nope"))
+
+    client.post("/v1/agents/nope", json={"message": "hi"})
+
+    assert any(r.levelno == logging.INFO and "404" in r.message for r in caplog.records)
+
+
+def test_run_agent_given_rate_limited_does_not_log_in_app_layer(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.DEBUG, logger="agent.api.app")
+    client = _client_for(LLMRateLimitedError("rate limited"))
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    # Already logged upstream in litellm.py with the same request_id -- app.py adds nothing.
+    assert [r for r in caplog.records if r.name == "agent.api.app"] == []
+
+
+def test_run_agent_given_generic_agent_error_logs_error_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.ERROR, logger="agent.api.app")
+    client = _client_for(AgentError("something unexpected"))
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    [record] = caplog.records
+    assert record.exc_info is not None
+
+
+def test_run_agent_given_unexpected_exception_logs_error_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    # A bare RuntimeError matches none of add_agent_run_route's except clauses (they only
+    # list AgentError and its subtypes), so it propagates past app.py entirely and is
+    # caught by RequestIdMiddleware's own fallback -- Starlette's ServerErrorMiddleware
+    # (which owns handlers for the literal Exception class) sits outside every middleware
+    # added via app.add_middleware(), so app.py's own @app.exception_handler(Exception) is
+    # structurally unreachable for this exact case (see api/README.md). This test checks
+    # the logger that actually fires, not app.py's -- checking agent.api.app here would
+    # silently pass by capturing nothing, giving false confidence in dead code.
+    caplog.set_level(logging.ERROR, logger="agent.api.request_context")
+    client = _client_for(RuntimeError("boom"))
+
+    client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    [record] = caplog.records
+    assert record.exc_info is not None
+
+
+def test_unmatched_route_returns_404_and_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.api.app")
+    client = _client_for(_run())
+
+    response = client.get("/does-not-exist")
+
+    assert response.status_code == 404
+    assert any("404" in r.message for r in caplog.records)
+
+
+def test_wrong_http_method_returns_405_and_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.api.app")
+    client = _client_for(_run())
+
+    response = client.get("/v1/agents/researcher")
+
+    assert response.status_code == 405
+    assert any("405" in r.message for r in caplog.records)
+
+
+def test_wrong_http_method_returns_405_with_allow_header():
+    client = _client_for(_run())
+
+    response = client.get("/v1/agents/researcher")
+
+    assert response.status_code == 405
+    assert "Allow" in response.headers
+
+
+def test_run_agent_given_missing_message_field_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.api.app")
+    client = _client_for(_run())
+
+    client.post("/v1/agents/researcher", json={})
+
+    assert any(r.levelno == logging.INFO for r in caplog.records)
+
+
+def test_run_agent_given_session_busy_returns_409():
+    client = _client_for(SessionBusyError("busy"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 409
+
+
+def test_run_agent_given_tool_not_allowed_returns_403():
+    client = _client_for(ToolNotAllowedError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 403
+
+
+def test_run_agent_given_model_not_allowed_returns_403():
+    client = _client_for(ModelNotAllowedError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 403
+
+
+def test_run_agent_given_strategy_not_allowed_returns_403():
+    client = _client_for(StrategyNotAllowedError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 403
+
+
+def test_run_agent_given_request_timeout_returns_504():
+    client = _client_for(RequestTimeoutError("too slow"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 504

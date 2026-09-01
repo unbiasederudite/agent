@@ -1,6 +1,7 @@
 """Hermetic wiring tests for create_app(): build_registries -> AgentRunService -> routes."""
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent.api.app import create_app
+from agent.core.exceptions import ConfigError
 
 
 def _fake_litellm_response() -> SimpleNamespace:
@@ -37,6 +39,21 @@ def _agent_config_path(tmp_path: Path, **agent_overrides: object) -> Path:
         )
     )
     return config_path
+
+
+def test_create_app_given_missing_config_file_raises_config_error(tmp_path: Path):
+    config_path = tmp_path / "does_not_exist.json"
+
+    with pytest.raises(ConfigError):
+        create_app(config_path)
+
+
+def test_create_app_given_invalid_json_config_raises_config_error(tmp_path: Path):
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text("not json")
+
+    with pytest.raises(ConfigError):
+        create_app(config_path)
 
 
 def test_create_app_given_agent_serves_run_with_prepended_system_prompt(
@@ -75,6 +92,39 @@ def test_create_app_given_unknown_agent_returns_404(
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "agent_not_found"
+
+
+def test_create_app_given_unmatched_route_returns_message_shaped_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Starlette's own framework-raised 404 (no matching route) has a plain-string `detail`
+    # by default -- handle_http_exception normalizes it to the same {"message": ...} shape
+    # every app-raised error uses, so callers can always read detail["message"].
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o"}]}))
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.get("/this-route-does-not-exist")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": {"message": "Not Found"}}
+
+
+def test_create_app_given_wrong_http_method_returns_message_shaped_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(json.dumps({"llms": [{"model": "openai/gpt-4o"}]}))
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.delete("/health")
+
+    assert response.status_code == 405
+    assert response.json() == {"detail": {"message": "Method Not Allowed"}}
 
 
 def test_create_app_given_request_tools_reaches_litellm_as_function_schema(
@@ -366,7 +416,7 @@ def test_create_app_given_session_id_reused_under_a_different_agent_returns_404(
     assert response.json()["detail"]["code"] == "session_not_found"
 
 
-def test_create_app_given_message_exceeds_max_input_chars_returns_400(
+def test_create_app_given_message_exceeds_max_input_chars_returns_413(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
@@ -377,8 +427,28 @@ def test_create_app_given_message_exceeds_max_input_chars_returns_400(
 
     response = client.post("/v1/agents/researcher", json={"message": "this is too long"})
 
-    assert response.status_code == 400
+    assert response.status_code == 413
     assert response.json()["detail"]["code"] == "input_too_large"
+
+
+def test_create_app_given_message_exceeds_max_input_chars_logs_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # agent_run.py already logs this at INFO before raising InputTooLargeError --
+    # handle_http_exception must not log a second INFO line for the same 400 response.
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path, max_input_chars=5)
+    app = create_app(config_path)
+    app_handler, app_records = _capture("agent.api.app")
+    run_handler, run_records = _capture("agent.core.services.agent_run")
+    client = TestClient(app)
+
+    client.post("/v1/agents/researcher", json={"message": "this is too long"})
+
+    logging.getLogger("agent.api.app").removeHandler(app_handler)
+    logging.getLogger("agent.core.services.agent_run").removeHandler(run_handler)
+    assert len(run_records) == 1
+    assert app_records == []
 
 
 def test_create_app_given_compaction_configured_wires_and_invokes_compaction_service(
@@ -447,7 +517,7 @@ def test_create_app_given_compaction_configured_wires_and_invokes_compaction_ser
     ]
 
 
-def test_create_app_given_context_window_exceeded_with_no_compaction_returns_502(
+def test_create_app_given_context_window_exceeded_with_no_compaction_returns_413(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     import litellm
@@ -467,11 +537,11 @@ def test_create_app_given_context_window_exceeded_with_no_compaction_returns_502
 
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
-    assert response.status_code == 502
+    assert response.status_code == 413
     assert response.json()["detail"]["code"] == "context_window_exceeded"
 
 
-def test_create_app_given_compaction_cannot_help_returns_502_compaction_exhausted(
+def test_create_app_given_compaction_cannot_help_returns_413_compaction_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     # Second call: the agent call overflows, and every compaction tier fails too (the
@@ -516,5 +586,157 @@ def test_create_app_given_compaction_cannot_help_returns_502_compaction_exhauste
         json={"message": "what's next?", "session_id": session_id},
     )
 
-    assert response.status_code == 502
+    assert response.status_code == 413
     assert response.json()["detail"]["code"] == "compaction_exhausted"
+
+
+def _capture(logger_name: str) -> tuple[logging.Handler, list[logging.LogRecord]]:
+    """A handler attached directly to a named logger.
+
+    Safe against configure_logging()'s own logging.basicConfig(force=True), which only
+    replaces the *root* logger's handler list, never a named child logger's own
+    directly-attached ones.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    target = logging.getLogger(logger_name)
+    target.addHandler(handler)
+    target.setLevel(logging.DEBUG)
+    return handler, records
+
+
+def test_create_app_logs_startup_info_with_wiring_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    handler, records = _capture("agent.api.app")
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+
+    create_app(config_path)
+
+    logging.getLogger("agent.api.app").removeHandler(handler)
+    [record] = [r for r in records if r.levelno == logging.INFO]
+    assert "agent-core started" in record.message
+    assert "1" in record.message  # one agent configured by _agent_config_path
+
+
+def test_create_app_health_endpoint_returns_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_create_app_health_endpoint_logs_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+    app = create_app(config_path)  # startup log already fired; irrelevant to this test
+    handler, records = _capture("agent.api.app")
+    client = TestClient(app)
+
+    client.get("/health")
+
+    logging.getLogger("agent.api.app").removeHandler(handler)
+    assert records == []
+
+
+def test_create_app_registry_listing_logs_debug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+    app = create_app(config_path)
+    handler, records = _capture("agent.api.app")
+    client = TestClient(app)
+
+    client.get("/v1/agents")
+
+    logging.getLogger("agent.api.app").removeHandler(handler)
+    [record] = records
+    assert record.levelno == logging.DEBUG
+    assert "agents" in record.message
+
+
+def test_create_app_response_carries_x_request_id_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = _agent_config_path(tmp_path)
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.headers["X-Request-ID"]
+
+
+def test_create_app_given_json_logging_format_uses_json_formatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "strategies": [{"name": "react"}],
+                "agents": [
+                    {
+                        "name": "researcher",
+                        "system_prompt": "You are a research assistant.",
+                        "model": "openai/gpt-4o",
+                        "strategy": "react",
+                    }
+                ],
+                "logging": {"format": "json"},
+            }
+        )
+    )
+
+    create_app(config_path)
+
+    from agent.api.logging_setup import JsonFormatter
+
+    assert isinstance(logging.getLogger().handlers[0].formatter, JsonFormatter)
+
+
+def test_create_app_given_max_sessions_wires_it_into_the_session_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "strategies": [{"name": "react"}],
+                "agents": [
+                    {
+                        "name": "researcher",
+                        "system_prompt": "You are a research assistant.",
+                        "model": "openai/gpt-4o",
+                        "strategy": "react",
+                    }
+                ],
+                "max_sessions": 1,
+            }
+        )
+    )
+    app = create_app(config_path)
+    client = TestClient(app)
+
+    first = client.post("/v1/agents/researcher", json={"message": "hi"})
+    second = client.post("/v1/agents/researcher", json={"message": "hi again"})
+
+    get_first = client.get(f"/v1/agents/researcher/sessions/{first.json()['session_id']}")
+    get_second = client.get(f"/v1/agents/researcher/sessions/{second.json()['session_id']}")
+    assert get_first.status_code == 404  # evicted -- max_sessions=1
+    assert get_second.status_code == 200

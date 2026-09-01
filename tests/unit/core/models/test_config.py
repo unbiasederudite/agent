@@ -7,6 +7,7 @@ from agent.core.models.config import (
     CompactionConfig,
     LLMConfig,
     LoggingConfig,
+    StrategyConfig,
     ToolConfig,
 )
 
@@ -31,6 +32,39 @@ def test_llm_config_given_sampling_params_constructs():
     assert config.temperature == 0.2
     assert config.top_p == 0.9
     assert config.max_tokens == 512
+
+
+def test_llm_config_given_negative_temperature_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", temperature=-0.1)
+
+
+def test_llm_config_given_temperature_above_two_still_constructs():
+    # No upper bound: provider-specific (2 for OpenAI, 1 for Anthropic), left for the
+    # provider itself to reject -- matches AgentRunRequest.temperature in api/schemas.py.
+    config = LLMConfig(model="openai/gpt-4o", temperature=2.1)
+
+    assert config.temperature == 2.1
+
+
+def test_llm_config_given_negative_top_p_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", top_p=-0.1)
+
+
+def test_llm_config_given_top_p_above_one_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", top_p=1.1)
+
+
+def test_llm_config_given_zero_max_tokens_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", max_tokens=0)
+
+
+def test_llm_config_given_negative_max_tokens_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", max_tokens=-1)
 
 
 def test_llm_config_given_no_context_window_defaults_to_none():
@@ -121,6 +155,19 @@ def test_agent_config_given_sampling_params_constructs():
     assert config.temperature == 0.1
     assert config.top_p == 0.8
     assert config.max_tokens == 256
+
+
+def test_agent_config_given_top_p_above_one_raises_validation_error():
+    # AgentConfig inherits SamplingDefaults' bounds the same way LLMConfig does -- one
+    # confirming test here, full bound coverage lives on the LLMConfig tests above.
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+            strategy="react",
+            top_p=1.1,
+        )
 
 
 def test_app_config_given_no_agents_defaults_to_empty_list():
@@ -408,3 +455,297 @@ def test_compaction_config_given_chunk_turns_constructs():
 def test_compaction_config_given_zero_chunk_turns_raises_validation_error():
     with pytest.raises(ValidationError):
         CompactionConfig(model="anthropic/claude-3-5-haiku-20241022", chunk_turns=0)
+
+
+def test_llm_config_given_no_retry_settings_defaults():
+    config = LLMConfig(model="openai/gpt-4o")
+
+    assert config.num_retries == 2
+    assert config.timeout is None
+    assert config.retry_base_delay == 1.0
+    assert config.retry_max_delay == 30.0
+    assert config.retry_multiplier == 2.0
+    assert config.max_concurrent_requests is None
+
+
+def test_llm_config_given_retry_settings_constructs():
+    config = LLMConfig(
+        model="openai/gpt-4o",
+        num_retries=5,
+        timeout=10.0,
+        retry_base_delay=0.5,
+        retry_max_delay=8.0,
+        retry_multiplier=3.0,
+        max_concurrent_requests=4,
+    )
+
+    assert config.num_retries == 5
+    assert config.timeout == 10.0
+    assert config.retry_base_delay == 0.5
+    assert config.retry_max_delay == 8.0
+    assert config.retry_multiplier == 3.0
+    assert config.max_concurrent_requests == 4
+
+
+def test_llm_config_given_negative_num_retries_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", num_retries=-1)
+
+
+def test_llm_config_given_zero_timeout_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", timeout=0)
+
+
+def test_llm_config_given_zero_retry_base_delay_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", retry_base_delay=0)
+
+
+def test_llm_config_given_zero_max_concurrent_requests_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", max_concurrent_requests=0)
+
+
+def test_llm_config_given_max_delay_below_base_delay_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig(model="openai/gpt-4o", retry_base_delay=10.0, retry_max_delay=1.0)
+
+
+def test_llm_config_given_max_delay_equal_to_base_delay_constructs():
+    config = LLMConfig(model="openai/gpt-4o", retry_base_delay=5.0, retry_max_delay=5.0)
+
+    assert config.retry_max_delay == 5.0
+
+
+def test_logging_config_given_no_args_defaults_format_and_console_and_file():
+    config = LoggingConfig()
+
+    assert config.format == "text"
+    assert config.console is True
+    assert config.file is None
+    assert config.file_max_bytes is None
+    assert config.file_backup_count == 5
+
+
+def test_logging_config_given_json_format_constructs():
+    config = LoggingConfig(format="json")
+
+    assert config.format == "json"
+
+
+def test_logging_config_given_invalid_format_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LoggingConfig(format="xml")
+
+
+def test_logging_config_given_file_without_max_bytes_constructs_uncapped():
+    config = LoggingConfig(file="/var/log/agent.log")
+
+    assert config.file == "/var/log/agent.log"
+    assert config.file_max_bytes is None
+
+
+def test_logging_config_given_file_and_max_bytes_constructs_rotating():
+    config = LoggingConfig(file="/var/log/agent.log", file_max_bytes=1_000_000, file_backup_count=3)
+
+    assert config.file_max_bytes == 1_000_000
+    assert config.file_backup_count == 3
+
+
+def test_logging_config_given_console_false_and_file_set_constructs():
+    config = LoggingConfig(console=False, file="/var/log/agent.log")
+
+    assert config.console is False
+
+
+def test_logging_config_given_console_false_and_no_file_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LoggingConfig(console=False)
+
+
+def test_logging_config_given_zero_file_max_bytes_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LoggingConfig(file="/var/log/agent.log", file_max_bytes=0)
+
+
+def test_app_config_given_no_max_sessions_defaults_to_unbounded():
+    config = AppConfig(llms=[LLMConfig(model="openai/gpt-4o")])
+
+    assert config.max_sessions is None
+
+
+def test_app_config_given_max_sessions_constructs():
+    config = AppConfig(llms=[LLMConfig(model="openai/gpt-4o")], max_sessions=500)
+
+    assert config.max_sessions == 500
+
+
+def test_app_config_given_zero_max_sessions_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AppConfig(llms=[LLMConfig(model="openai/gpt-4o")], max_sessions=0)
+
+
+def test_app_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate_json('{"llms": [{"model": "openai/gpt-4o"}], "max_sesions": 100}')
+
+
+def test_agent_config_given_no_ceilings_defaults_to_unrestricted():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+    )
+
+    assert config.allowed_tools is None
+    assert config.allowed_models is None
+    assert config.allowed_strategies is None
+    assert config.max_request_seconds is None
+
+
+def test_agent_config_given_allowed_tools_superset_of_tools_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        tools=["search"],
+        allowed_tools=["search", "write"],
+    )
+
+    assert config.allowed_tools == ["search", "write"]
+
+
+def test_agent_config_given_tools_outside_allowed_tools_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+            strategy="react",
+            tools=["search"],
+            allowed_tools=["write"],
+        )
+
+
+def test_agent_config_given_empty_allowed_tools_and_empty_tools_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        allowed_tools=[],
+    )
+
+    assert config.allowed_tools == []
+
+
+def test_agent_config_given_model_matching_allowed_models_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        allowed_models=["openai/gpt-4o", "openai/gpt-4o-mini"],
+    )
+
+    assert config.allowed_models == ["openai/gpt-4o", "openai/gpt-4o-mini"]
+
+
+def test_agent_config_given_model_outside_allowed_models_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+            strategy="react",
+            allowed_models=["anthropic/claude-sonnet-5"],
+        )
+
+
+def test_agent_config_given_strategy_matching_allowed_strategies_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        allowed_strategies=["react"],
+    )
+
+    assert config.allowed_strategies == ["react"]
+
+
+def test_agent_config_given_strategy_outside_allowed_strategies_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+            strategy="react",
+            allowed_strategies=["langgraph"],
+        )
+
+
+def test_agent_config_given_max_request_seconds_constructs():
+    config = AgentConfig(
+        name="researcher",
+        system_prompt="You are a research assistant.",
+        model="openai/gpt-4o",
+        strategy="react",
+        max_request_seconds=30.0,
+    )
+
+    assert config.max_request_seconds == 30.0
+
+
+def test_agent_config_given_zero_max_request_seconds_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig(
+            name="researcher",
+            system_prompt="You are a research assistant.",
+            model="openai/gpt-4o",
+            strategy="react",
+            max_request_seconds=0,
+        )
+
+
+def test_llm_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LLMConfig.model_validate({"model": "openai/gpt-4o", "tmeperature": 0.5})
+
+
+def test_agent_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        AgentConfig.model_validate(
+            {
+                "name": "researcher",
+                "system_prompt": "You are a research assistant.",
+                "model": "openai/gpt-4o",
+                "strategy": "react",
+                "tempreature": 0.5,
+            }
+        )
+
+
+def test_tool_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        ToolConfig.model_validate({"name": "get_current_time", "nmae": "typo"})
+
+
+def test_strategy_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        StrategyConfig.model_validate({"name": "react", "nmae": "typo"})
+
+
+def test_compaction_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        CompactionConfig.model_validate(
+            {"model": "anthropic/claude-3-5-haiku-20241022", "tokne_budget_pct": 0.5}
+        )
+
+
+def test_logging_config_given_unknown_field_raises_validation_error():
+    with pytest.raises(ValidationError):
+        LoggingConfig.model_validate({"levle": "DEBUG"})

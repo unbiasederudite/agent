@@ -1,11 +1,18 @@
 """Compaction: keeps a session's stored history under a configured token budget."""
 
+import logging
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Literal
+
 from agent.core.exceptions import LLMContextWindowExceededError, LLMError
 from agent.core.models.config import CompactionConfig
 from agent.core.models.message import Message
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.isession_store import ISessionStore
 from agent.core.registries.llm import LLMRegistry
+
+logger = logging.getLogger(__name__)
 
 _SUMMARY_PREFIX = "[Summary of earlier conversation]\n"
 _ACKNOWLEDGMENT = "Understood — I have that context."
@@ -76,6 +83,21 @@ def _is_previous_summary_turn(old: list[Message]) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _SummaryOutcome:
+    """The result of one `_try_summarize` attempt.
+
+    `status`: "ok" (`text` holds the usable summary), "llm_error" (the call itself failed --
+    not retried again by `_summarize_with_retry`, since `LiteLLMAdapter` already retried
+    whatever was retriable one layer down), or "unusable" (the call succeeded but produced
+    content not worth keeping -- empty, whitespace-only, or truncated -- still retried once,
+    since this is summarization-specific business logic the adapter has no way to know about.
+    """
+
+    status: Literal["ok", "llm_error", "unusable"]
+    text: str | None = None
+
+
 class CompactionService:
     """Keeps a session's stored history under its configured token budget.
 
@@ -85,7 +107,11 @@ class CompactionService:
     """
 
     def __init__(
-        self, llm_registry: LLMRegistry, session_store: ISessionStore, config: CompactionConfig
+        self,
+        llm_registry: LLMRegistry,
+        session_store: ISessionStore,
+        config: CompactionConfig,
+        max_sessions: int | None = None,
     ) -> None:
         """Initialize CompactionService.
 
@@ -94,15 +120,39 @@ class CompactionService:
                 the agent's own model (for the budget check) and the configured summarizer.
             session_store: Per-conversation message history storage.
             config: Compaction settings (summarizer model, budget, keep-window, prompt).
+            max_sessions: Caps how many (agent, session_id) usage estimates are kept at
+                once, independently of ISessionStore's own cap on the same value -- see
+                `record_usage`. `None` means unbounded.
         """
         self._llm_registry = llm_registry
         self._session_store = session_store
         self._config = config
-        self._last_total_tokens: dict[tuple[str, str], int] = {}
+        self._last_total_tokens: OrderedDict[tuple[str, str], int] = OrderedDict()
+        self._max_sessions = max_sessions
 
     def record_usage(self, agent: str, session_id: str, total_tokens: int) -> None:
-        """Record this turn's ending size as the estimate for the next turn's check."""
-        self._last_total_tokens[(agent, session_id)] = total_tokens
+        """Record this turn's ending size as the estimate for the next turn's check.
+
+        Bounded by `max_sessions` via LRU eviction, independently of `ISessionStore`'s own
+        cap on the same value -- no cross-object coordination needed: a missing estimate
+        for a session that still exists just makes `maybe_compact` skip its proactive
+        check for one turn (already-existing, best-effort behavior for a session's very
+        first turn), and the reactive overflow catch in `AgentRunService.run()` remains
+        the real safety net regardless.
+        """
+        key = (agent, session_id)
+        self._last_total_tokens[key] = total_tokens
+        self._last_total_tokens.move_to_end(key)
+        if self._max_sessions is not None and len(self._last_total_tokens) > self._max_sessions:
+            self._last_total_tokens.popitem(last=False)
+
+    def forget(self, agent: str, session_id: str) -> None:
+        """Discard the recorded usage estimate for `(agent, session_id)`, if any.
+
+        Called when a session is deleted -- a no-op, not an error, if there was never a
+        recorded estimate for it (e.g. a session deleted before its first turn ended).
+        """
+        self._last_total_tokens.pop((agent, session_id), None)
 
     async def maybe_compact(self, agent: str, session_id: str, model: str) -> None:
         """Compact now if the last-recorded size is over budget for `model`.
@@ -118,10 +168,32 @@ class CompactionService:
         try:
             max_input_tokens = self._llm_registry.get(model).max_input_tokens()
         except LLMError:
+            logger.debug(
+                "skipping proactive compaction check for (%s, %s): context window unknown "
+                "for model %s",
+                agent,
+                session_id,
+                model,
+            )
             return
         budget = max_input_tokens * self._config.token_budget_pct
         if last > budget:
+            logger.info(
+                "proactive compaction triggered for (%s, %s): %d tokens over budget %.0f",
+                agent,
+                session_id,
+                last,
+                budget,
+            )
             await self.compact(agent, session_id)
+        else:
+            logger.debug(
+                "checked (%s, %s): %d tokens, still under budget %.0f",
+                agent,
+                session_id,
+                last,
+                budget,
+            )
 
     async def compact(self, agent: str, session_id: str) -> bool:
         """Summarize the old portion of `(agent, session_id)`'s history, if there is one.
@@ -164,38 +236,82 @@ class CompactionService:
         summary alone is still oversized with nothing else left to fall back on -- either
         way, real compaction resumes automatically once genuinely new content is part of
         `old` again, since that no longer matches this shape.
-        """
-        history = await self._session_store.get(agent, session_id)
-        split = _split_at_turn_boundary(history, self._config.keep_recent_turns)
-        if split == 0:
-            return False
-        old, recent = history[:split], history[split:]
-        if _is_previous_summary_turn(old):
-            return False
-        summarizer = self._llm_registry.get(self._config.model)
-        try:
-            summary_content = await self._summarize_with_retry(summarizer, old)
-        except LLMContextWindowExceededError:
-            summary_content = await self._summarize_chunked(summarizer, old)
-        if summary_content is None:
-            return False
-        summary_text = f"{_SUMMARY_PREFIX}{summary_content}"
-        new_history = [
-            Message(role="user", content=summary_text),
-            Message(role="assistant", content=_ACKNOWLEDGMENT),
-            *recent,
-        ]
-        # Message *count* would hide this: both sides can be 2 messages. Content length is
-        # what actually answers "did this shrink anything".
-        old_content_chars = sum(len(message.content or "") for message in old)
-        new_content_chars = sum(len(message.content or "") for message in new_history[:2])
-        if new_content_chars >= old_content_chars:
-            return False
-        await self._session_store.replace(agent, session_id, new_history)
-        self._last_total_tokens.pop((agent, session_id), None)
-        return True
 
-    async def _try_summarize(self, summarizer: ILLM, messages: list[Message]) -> str | None:
+        Holds `self._session_store.lock(agent, session_id)` across the entire method -- the
+        get, every summarizer call, and the final replace -- so a concurrent
+        `AgentRunService.run()`'s `append()` on the same session can't land in the window
+        between this method's read and its write and be silently lost.
+        """
+        async with self._session_store.lock(agent, session_id):
+            history = await self._session_store.get(agent, session_id)
+            split = _split_at_turn_boundary(history, self._config.keep_recent_turns)
+            if split == 0:
+                logger.debug(
+                    "nothing old enough to summarize for (%s, %s) given keep_recent_turns=%d",
+                    agent,
+                    session_id,
+                    self._config.keep_recent_turns,
+                )
+                return False
+            old, recent = history[:split], history[split:]
+            if _is_previous_summary_turn(old):
+                logger.debug(
+                    "(%s, %s): old portion is already a summary turn, nothing new to fold in",
+                    agent,
+                    session_id,
+                )
+                return False
+            summarizer = self._llm_registry.get(self._config.model)
+            try:
+                summary_content = await self._summarize_with_retry(summarizer, old)
+            except LLMContextWindowExceededError:
+                logger.warning(
+                    "single-pass summary overflowed the summarizer for (%s, %s), "
+                    "falling back to chunked map-reduce",
+                    agent,
+                    session_id,
+                )
+                summary_content = await self._summarize_chunked(summarizer, old)
+            if summary_content is None:
+                return False
+            summary_text = f"{_SUMMARY_PREFIX}{summary_content}"
+            new_history = [
+                Message(role="user", content=summary_text),
+                Message(role="assistant", content=_ACKNOWLEDGMENT),
+                *recent,
+            ]
+            # Message *count* would hide this: both sides can be 2 messages. Content length
+            # is what actually answers "did this shrink anything".
+            old_content_chars = sum(len(message.content or "") for message in old)
+            new_content_chars = sum(len(message.content or "") for message in new_history[:2])
+            if new_content_chars >= old_content_chars:
+                logger.warning(
+                    "summary for (%s, %s) was not smaller than the original content "
+                    "(%d >= %d chars), discarding",
+                    agent,
+                    session_id,
+                    new_content_chars,
+                    old_content_chars,
+                )
+                return False
+            # Commits immediately on success -- see RequestTimeoutError's docstring for the
+            # case where a timeout in the caller's subsequent LLM call leaves this rewrite
+            # committed with no signal back to the caller that it happened.
+            await self._session_store.replace(agent, session_id, new_history)
+            self._last_total_tokens.pop((agent, session_id), None)
+            logger.info(
+                "compacted (%s, %s): %d -> %d chars, %d turn(s) kept verbatim",
+                agent,
+                session_id,
+                old_content_chars,
+                new_content_chars,
+                len(_user_message_indices(recent)),
+            )
+            return True
+
+    async def _try_summarize(
+        self, summarizer: ILLM, messages: list[Message], *, is_retry: bool = False
+    ) -> _SummaryOutcome:
         """One summarizer call attempt over `messages` plus the configured prompt.
 
         The prompt is appended as a new trailing `role="user"` message -- unless `messages`
@@ -209,10 +325,16 @@ class CompactionService:
         a request with no `toolConfig`: `ILLM` implementations are required to fold that
         content out themselves whenever a call declares no tools, so nothing is needed here.
 
-        Returns the summary text, or `None` on a retryable failure (any `LLMError` other
-        than a context-window overflow, a truncated response, or empty/whitespace content).
-        A context-window overflow is not retryable by calling again with the same input --
-        it propagates uncaught so the caller can fall back to chunked summarization instead.
+        `is_retry` gates the truncation ERROR log so it fires at most once per
+        `_summarize_with_retry` call -- on the first (non-retry) attempt, a truncation is not
+        yet a real problem (the retry may well succeed), so it's logged only if it's still
+        happening on the retry, the point at which it's an actual, actionable failure.
+
+        Returns a `_SummaryOutcome`: "ok" with the summary text, "llm_error" if the call
+        raised any `LLMError` other than a context-window overflow, or "unusable" if the call
+        succeeded but produced a truncated response or empty/whitespace content. A
+        context-window overflow is not retryable by calling again with the same input -- it
+        propagates uncaught so the caller can fall back to chunked summarization instead.
         """
         if messages and messages[-1].role == "user":
             request = [
@@ -225,26 +347,40 @@ class CompactionService:
             completion = await summarizer.complete(request)
         except LLMContextWindowExceededError:
             raise
-        except LLMError:
-            return None
+        except LLMError as exc:
+            logger.warning(
+                "summarizer call failed, giving up (adapter already retried what was "
+                "retriable): %s",
+                exc,
+                extra={"exception_type": type(exc).__name__},
+            )
+            return _SummaryOutcome(status="llm_error")
         if completion.finish_reason == "length":
-            return None
+            if is_retry:
+                logger.error(
+                    "summary was truncated (finish_reason=length) for model %s -- "
+                    "its own max_tokens is likely too low",
+                    self._config.model,
+                )
+            return _SummaryOutcome(status="unusable")
         content = (completion.message.content or "").strip()
-        return completion.message.content if content else None
+        if not content:
+            return _SummaryOutcome(status="unusable")
+        return _SummaryOutcome(status="ok", text=completion.message.content)
 
     async def _summarize_with_retry(self, summarizer: ILLM, messages: list[Message]) -> str | None:
-        """`_try_summarize`, retried once if the first attempt fails transiently.
+        """`_try_summarize`, retried once if the result was unusable -- not if it raised.
 
-        Used for the single-pass call and, inside `_summarize_chunked`, for each chunk's map
-        call and the final reduce call -- a transient failure (rate limit, timeout, a
-        truncated or empty response) on any one of them no longer fails the whole chunked
-        attempt outright. A context-window overflow is never retried here either -- it still
-        propagates uncaught, since the same oversized input would fail identically.
+        A raised `LLMError` gives up immediately: `LiteLLMAdapter` already retried whatever
+        was retriable one layer down before ever raising, so retrying again here would be
+        redundant for a transient failure and pure waste for a permanent one. An *unusable*
+        result (empty, whitespace-only, or truncated content) is still retried once -- that's
+        summarization-specific business logic the adapter has no way to know about.
         """
-        summary = await self._try_summarize(summarizer, messages)
-        if summary is None:
-            summary = await self._try_summarize(summarizer, messages)
-        return summary
+        outcome = await self._try_summarize(summarizer, messages)
+        if outcome.status == "unusable":
+            outcome = await self._try_summarize(summarizer, messages, is_retry=True)
+        return outcome.text if outcome.status == "ok" else None
 
     async def _summarize_chunked(self, summarizer: ILLM, messages: list[Message]) -> str | None:
         """Summarize `messages` in chunks, for when a single pass overflows the summarizer.
@@ -265,6 +401,9 @@ class CompactionService:
             try:
                 summary = await self._summarize_with_retry(summarizer, chunk)
             except LLMContextWindowExceededError:
+                logger.warning(
+                    "a chunk's own content still overflowed the summarizer even after chunking"
+                )
                 return None
             if summary is None:
                 return None
@@ -276,4 +415,5 @@ class CompactionService:
         try:
             return await self._summarize_with_retry(summarizer, combined)
         except LLMContextWindowExceededError:
+            logger.warning("the reduce step (combining chunk summaries) overflowed the summarizer")
             return None

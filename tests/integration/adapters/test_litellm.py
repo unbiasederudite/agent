@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -9,9 +11,11 @@ from agent.adapters.litellm import LiteLLMAdapter
 from agent.core.exceptions import (
     LLMContextWindowExceededError,
     LLMError,
+    LLMOverloadedError,
     LLMRateLimitedError,
     LLMTimeoutError,
 )
+from agent.core.models.config import LLMConfig
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
 
 
@@ -61,6 +65,45 @@ _A_TOOL_SCHEMA: list[dict[str, Any]] = [
 ]
 
 
+def test_from_config_maps_every_field_onto_the_adapter():
+    config = LLMConfig(
+        model="openai/gpt-4o",
+        temperature=0.2,
+        top_p=0.9,
+        max_tokens=512,
+        context_window=32000,
+        num_retries=5,
+        timeout=10.0,
+        retry_base_delay=0.5,
+        retry_max_delay=8.0,
+        retry_multiplier=3.0,
+        max_concurrent_requests=4,
+    )
+
+    adapter = LiteLLMAdapter.from_config(config)
+
+    assert adapter._model == "openai/gpt-4o"
+    assert adapter._temperature == 0.2
+    assert adapter._top_p == 0.9
+    assert adapter._max_tokens == 512
+    assert adapter._context_window == 32000
+    assert adapter._num_retries == 5
+    assert adapter._timeout == 10.0
+    assert adapter._retry_base_delay == 0.5
+    assert adapter._retry_max_delay == 8.0
+    assert adapter._retry_multiplier == 3.0
+    assert adapter._max_concurrent == 4
+
+
+def test_from_config_given_only_model_uses_llm_config_defaults():
+    adapter = LiteLLMAdapter.from_config(LLMConfig(model="openai/gpt-4o"))
+
+    assert adapter._temperature is None
+    assert adapter._num_retries == 2
+    assert adapter._retry_base_delay == 1.0
+    assert adapter._max_concurrent is None
+
+
 async def test_complete_given_successful_response_returns_completion(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -93,7 +136,7 @@ async def test_complete_given_litellm_raises_wraps_as_llm_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr("litellm.acompletion", AsyncMock(side_effect=RuntimeError("provider down")))
-    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=0)
 
     with pytest.raises(LLMError):
         await adapter.complete([Message(role="user", content="hi")])
@@ -104,11 +147,17 @@ async def test_complete_given_empty_choices_raises_llm_error(monkeypatch: pytest
         choices=[],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
-    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=response))
-    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    mock_acompletion = AsyncMock(return_value=response)
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
 
     with pytest.raises(LLMError):
         await adapter.complete([Message(role="user", content="hi")])
+
+    # A malformed response is a model/prompt issue, not a transient failure -- it must
+    # not be retried (an empty `choices` list has no .status_code, so the retry loop's
+    # own classification would otherwise treat it as one and burn the whole budget).
+    assert mock_acompletion.call_count == 1
 
 
 async def test_complete_given_none_content_raises_llm_error(monkeypatch: pytest.MonkeyPatch):
@@ -116,11 +165,14 @@ async def test_complete_given_none_content_raises_llm_error(monkeypatch: pytest.
         choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
-    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=response))
-    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    mock_acompletion = AsyncMock(return_value=response)
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
 
     with pytest.raises(LLMError):
         await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
 
 
 async def test_complete_given_empty_string_content_and_no_tool_calls_raises_llm_error(
@@ -177,7 +229,7 @@ async def test_complete_given_status_code_429_raises_llm_rate_limited_error(
         "litellm.acompletion",
         AsyncMock(side_effect=_FakeProviderError("rate limited", status_code=429)),
     )
-    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=0)
 
     with pytest.raises(LLMRateLimitedError):
         await adapter.complete([Message(role="user", content="hi")])
@@ -190,7 +242,7 @@ async def test_complete_given_status_code_408_raises_llm_timeout_error(
         "litellm.acompletion",
         AsyncMock(side_effect=_FakeProviderError("timed out", status_code=408)),
     )
-    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=0)
 
     with pytest.raises(LLMTimeoutError):
         await adapter.complete([Message(role="user", content="hi")])
@@ -549,3 +601,390 @@ def test_max_input_tokens_given_context_window_override_takes_precedence_over_re
     adapter = LiteLLMAdapter(model="openai/gpt-4o", context_window=999)
 
     assert adapter.max_input_tokens() == 999
+
+
+async def test_complete_given_status_code_401_raises_immediately_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("bad key", status_code=401))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
+
+
+async def test_complete_given_status_code_400_raises_immediately_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("bad request", status_code=400))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
+
+
+async def test_complete_given_status_code_404_raises_immediately_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("not found", status_code=404))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
+
+
+async def test_complete_given_status_code_429_retries_up_to_num_retries_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("rate limited", status_code=429))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=2)
+
+    with pytest.raises(LLMRateLimitedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 3  # the initial attempt plus 2 retries
+
+
+async def test_complete_given_status_code_500_is_retriable(monkeypatch: pytest.MonkeyPatch):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("server error", status_code=500))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=1)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 2
+
+
+async def test_complete_given_connection_error_with_no_status_code_is_retriable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(
+        side_effect=[RuntimeError("connection reset"), _fake_litellm_response()]
+    )
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=1)
+
+    completion = await adapter.complete([Message(role="user", content="hi")])
+
+    assert completion.message.content == "hello!"
+    assert mock_acompletion.call_count == 2
+
+
+async def test_complete_given_transient_failure_then_success_returns_normally(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(
+        side_effect=[_FakeProviderError("rate limited", status_code=429), _fake_litellm_response()]
+    )
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=2)
+
+    completion = await adapter.complete([Message(role="user", content="hi")])
+
+    assert completion.message.content == "hello!"
+    assert mock_acompletion.call_count == 2
+
+
+async def test_complete_given_retries_uses_configured_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("rate limited", status_code=429))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    mock_sleep = AsyncMock()
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", mock_sleep)
+    adapter = LiteLLMAdapter(
+        model="openai/gpt-4o",
+        num_retries=3,
+        retry_base_delay=1.0,
+        retry_multiplier=2.0,
+        retry_max_delay=30.0,
+    )
+
+    with pytest.raises(LLMRateLimitedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    delays = [call.args[0] for call in mock_sleep.call_args_list]
+    expected = [1.0, 2.0, 4.0]
+    assert len(delays) == len(expected)
+    for actual, base in zip(delays, expected, strict=True):
+        assert base * 0.5 <= actual <= base
+
+
+async def test_complete_given_retry_delay_caps_at_max_delay(monkeypatch: pytest.MonkeyPatch):
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("rate limited", status_code=429))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    mock_sleep = AsyncMock()
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", mock_sleep)
+    adapter = LiteLLMAdapter(
+        model="openai/gpt-4o",
+        num_retries=4,
+        retry_base_delay=10.0,
+        retry_multiplier=3.0,
+        retry_max_delay=15.0,
+    )
+
+    with pytest.raises(LLMRateLimitedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    delays = [call.args[0] for call in mock_sleep.call_args_list]
+    expected = [10.0, 15.0, 15.0, 15.0]
+    assert len(delays) == len(expected)
+    for actual, base in zip(delays, expected, strict=True):
+        assert base * 0.5 <= actual <= base
+
+
+async def test_complete_given_malformed_response_raises_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A message with neither content nor tool_calls is our own raised LLMError -- a
+    # persistently malformed response is a model/prompt issue, not a transient failure.
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    mock_acompletion = AsyncMock(return_value=response)
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
+
+
+async def test_complete_given_unexpected_response_shape_raises_llm_error_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # response.usage is missing entirely -- an AttributeError while constructing
+    # Completion, not the two already-covered shape problems (empty choices, no
+    # content/tool_calls). Same "malformed response, don't retry" contract should apply.
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="hi"), finish_reason="stop")]
+    )
+    mock_acompletion = AsyncMock(return_value=response)
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=3)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert mock_acompletion.call_count == 1
+
+
+async def test_complete_never_passes_num_retries_kwarg_to_litellm(monkeypatch: pytest.MonkeyPatch):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=5)
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    _, kwargs = mock_acompletion.call_args
+    assert "num_retries" not in kwargs
+
+
+async def test_complete_given_timeout_set_forwards_it(monkeypatch: pytest.MonkeyPatch):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", timeout=15.0)
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    _, kwargs = mock_acompletion.call_args
+    assert kwargs["timeout"] == 15.0
+
+
+async def test_complete_given_no_timeout_omits_it(monkeypatch: pytest.MonkeyPatch):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    _, kwargs = mock_acompletion.call_args
+    assert "timeout" not in kwargs
+
+
+async def test_complete_given_retry_logs_warning_with_structured_exception_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.adapters.litellm")
+    mock_acompletion = AsyncMock(
+        side_effect=[_FakeProviderError("rate limited", status_code=429), _fake_litellm_response()]
+    )
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=1)
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    [record] = caplog.records
+    assert record.exception_type == "_FakeProviderError"
+    assert record.status_code == 429
+    assert record.attempt == 1
+
+
+async def test_complete_given_exhausted_retries_logs_error_with_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.ERROR, logger="agent.adapters.litellm")
+    mock_acompletion = AsyncMock(side_effect=_FakeProviderError("rate limited", status_code=429))
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", AsyncMock())
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", num_retries=1)
+
+    with pytest.raises(LLMRateLimitedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.exc_info is not None
+    assert record.status_code == 429
+
+
+async def test_complete_given_at_capacity_raises_immediately_without_calling_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=1)
+    adapter._in_flight = 1  # simulate one call already in flight
+
+    with pytest.raises(LLMOverloadedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    mock_acompletion.assert_not_called()
+
+
+async def test_complete_given_max_concurrent_requests_none_never_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    adapter = LiteLLMAdapter(model="openai/gpt-4o")
+    adapter._in_flight = 1000
+
+    completion = await adapter.complete([Message(role="user", content="hi")])
+
+    assert completion.message.content == "hello!"
+
+
+async def test_complete_given_two_concurrent_calls_below_cap_both_proceed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release = asyncio.Event()
+
+    async def _slow_acompletion(**kwargs: object) -> SimpleNamespace:
+        await release.wait()
+        return _fake_litellm_response()
+
+    monkeypatch.setattr("litellm.acompletion", _slow_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=2)
+
+    task1 = asyncio.create_task(adapter.complete([Message(role="user", content="a")]))
+    task2 = asyncio.create_task(adapter.complete([Message(role="user", content="b")]))
+    await asyncio.sleep(0)
+    assert adapter._in_flight == 2
+    release.set()
+    result1, result2 = await asyncio.gather(task1, task2)
+
+    assert result1.message.content == "hello!"
+    assert result2.message.content == "hello!"
+
+
+async def test_complete_given_third_call_while_two_in_flight_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release = asyncio.Event()
+
+    async def _slow_acompletion(**kwargs: object) -> SimpleNamespace:
+        await release.wait()
+        return _fake_litellm_response()
+
+    monkeypatch.setattr("litellm.acompletion", _slow_acompletion)
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=2)
+    task1 = asyncio.create_task(adapter.complete([Message(role="user", content="a")]))
+    task2 = asyncio.create_task(adapter.complete([Message(role="user", content="b")]))
+    await asyncio.sleep(0)
+
+    with pytest.raises(LLMOverloadedError):
+        await adapter.complete([Message(role="user", content="c")])
+
+    release.set()
+    await asyncio.gather(task1, task2)
+
+
+async def test_complete_in_flight_count_returns_to_zero_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=1)
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    assert adapter._in_flight == 0
+
+
+async def test_complete_in_flight_count_returns_to_zero_after_exhausted_retries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "litellm.acompletion",
+        AsyncMock(side_effect=_FakeProviderError("bad key", status_code=401)),
+    )
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=1, num_retries=0)
+
+    with pytest.raises(LLMError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    assert adapter._in_flight == 0
+
+
+async def test_complete_given_at_capacity_logs_warning_with_structured_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.adapters.litellm")
+    adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=1)
+    adapter._in_flight = 1
+
+    with pytest.raises(LLMOverloadedError):
+        await adapter.complete([Message(role="user", content="hi")])
+
+    [record] = caplog.records
+    assert record.model == "openai/gpt-4o"
+    assert record.in_flight == 1
+    assert record.max_concurrent == 1
+
+
+async def test_complete_given_retriable_failure_applies_jitter_to_the_delay(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_acompletion = AsyncMock(
+        side_effect=[_FakeProviderError("rate limited", status_code=429), _fake_litellm_response()]
+    )
+    monkeypatch.setattr("litellm.acompletion", mock_acompletion)
+    mock_sleep = AsyncMock()
+    monkeypatch.setattr("agent.adapters.litellm.asyncio.sleep", mock_sleep)
+    adapter = LiteLLMAdapter(
+        model="openai/gpt-4o", num_retries=1, retry_base_delay=10.0, retry_multiplier=2.0
+    )
+
+    await adapter.complete([Message(role="user", content="hi")])
+
+    delay = mock_sleep.call_args_list[0].args[0]
+    assert 5.0 <= delay < 10.0  # base_delay=10.0 * uniform(0.5, 1.0), never the bare 10.0

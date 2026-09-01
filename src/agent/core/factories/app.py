@@ -1,10 +1,6 @@
 """Factory for building runtime registries from configuration."""
 
-import logging
 from collections.abc import Callable
-from pathlib import Path
-
-from pydantic import ValidationError
 
 from agent.adapters.litellm import LiteLLMAdapter
 from agent.core.exceptions import ConfigError
@@ -13,6 +9,7 @@ from agent.core.models.config import (
     AppConfig,
     CompactionConfig,
     LLMConfig,
+    LoggingConfig,
     StrategyConfig,
     ToolConfig,
 )
@@ -42,14 +39,7 @@ def _build_llm_registry(llm_configs: list[LLMConfig]) -> tuple[LLMRegistry, set[
         if llm_config.model in seen_models:
             raise ConfigError(f"duplicate LLM model in config: {llm_config.model}")
         seen_models.add(llm_config.model)
-        adapter = LiteLLMAdapter(
-            llm_config.model,
-            temperature=llm_config.temperature,
-            top_p=llm_config.top_p,
-            max_tokens=llm_config.max_tokens,
-            context_window=llm_config.context_window,
-        )
-        llm_registry.register(llm_config.model, adapter)
+        llm_registry.register(llm_config.model, LiteLLMAdapter.from_config(llm_config))
     return llm_registry, seen_models
 
 
@@ -120,7 +110,7 @@ def _build_agent_registry(
 
 
 def build_registries(
-    config_path: Path,
+    config: AppConfig,
 ) -> tuple[
     LLMRegistry,
     AgentRegistry,
@@ -128,29 +118,34 @@ def build_registries(
     StrategyRegistry,
     str | None,
     CompactionConfig | None,
+    LoggingConfig,
+    int | None,
 ]:
-    """Load AppConfig from `config_path` and return populated registries plus raw config.
+    """Build populated registries plus raw config from an already-loaded `AppConfig`.
+
+    Takes a parsed `AppConfig`, not a file path -- reading/parsing the config file is I/O,
+    which this factory (like the rest of `core/`) owns none of; the caller (`api/app.py`'s
+    `create_app()`) reads and validates the JSON itself and passes the result in here.
 
     Returns the registries, `base_prompt`, and the raw `compaction` config. `create_app()`
     builds `CompactionService` from the raw config, since that also needs `session_store`,
-    a process-level object with no config surface of its own.
+    a process-level object with no config surface of its own. Also returns the raw `logging`
+    config -- `create_app()` builds its own logging setup from it, since that also needs
+    things (a request-id filter, whether this is even an HTTP context) not owned by this
+    factory, the same reasoning `compaction_config` already documents here. Also returns the
+    raw `max_sessions` value -- `create_app()` passes it straight to `InMemorySessionStore`'s
+    constructor, since this factory has no session-store object of its own to configure.
 
     Raises:
-        ConfigError: if the file is missing, not valid JSON, fails AppConfig validation,
-            declares a duplicate LLM model, agent name, tool name, or strategy name, an
-            agent's `model` doesn't match any configured LLM, an agent's `strategy` doesn't
-            match any configured strategy, an agent's `tools` entry doesn't match any
-            configured tool or repeats a tool name, a configured tool or strategy name has
-            no matching code-level implementation, or `compaction.model` doesn't match any
-            configured LLM.
+        ConfigError: if `config` declares a duplicate LLM model, agent name, tool name, or
+            strategy name, an agent's `model` doesn't match any configured LLM, an agent's
+            `strategy` doesn't match any configured strategy, an agent's `tools` entry
+            doesn't match any configured tool or repeats a tool name, a configured tool or
+            strategy name has no matching code-level implementation, `compaction.model`
+            doesn't match any configured LLM, or an agent's `allowed_tools`,
+            `allowed_models`, or `allowed_strategies` entry doesn't match any configured
+            tool, model, or strategy.
     """
-    try:
-        config = AppConfig.model_validate_json(config_path.read_bytes())
-    except (OSError, ValidationError) as exc:
-        raise ConfigError(str(exc)) from exc
-
-    logging.basicConfig(level=config.logging.level, force=True)
-
     llm_registry, known_models = _build_llm_registry(config.llms)
     tool_registry, known_tools = _build_tool_registry(config.tools)
     strategy_registry, known_strategies = _build_strategy_registry(config.strategies)
@@ -160,6 +155,29 @@ def build_registries(
     if config.compaction is not None and config.compaction.model not in known_models:
         raise ConfigError(f"compaction declares unknown model: {config.compaction.model}")
 
+    for agent_config in config.agents:
+        if agent_config.allowed_tools is not None:
+            for tool_name in agent_config.allowed_tools:
+                if tool_name not in known_tools:
+                    raise ConfigError(
+                        f"agent '{agent_config.name}' declares unknown tool in "
+                        f"allowed_tools: {tool_name}"
+                    )
+        if agent_config.allowed_models is not None:
+            for model_name in agent_config.allowed_models:
+                if model_name not in known_models:
+                    raise ConfigError(
+                        f"agent '{agent_config.name}' declares unknown model in "
+                        f"allowed_models: {model_name}"
+                    )
+        if agent_config.allowed_strategies is not None:
+            for strategy_name in agent_config.allowed_strategies:
+                if strategy_name not in known_strategies:
+                    raise ConfigError(
+                        f"agent '{agent_config.name}' declares unknown strategy in "
+                        f"allowed_strategies: {strategy_name}"
+                    )
+
     return (
         llm_registry,
         agent_registry,
@@ -167,4 +185,6 @@ def build_registries(
         strategy_registry,
         config.base_prompt,
         config.compaction,
+        config.logging,
+        config.max_sessions,
     )

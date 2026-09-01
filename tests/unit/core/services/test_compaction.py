@@ -1,5 +1,6 @@
 """Tests for CompactionService."""
 
+import logging
 from typing import Any
 
 import pytest
@@ -8,7 +9,6 @@ from agent.core.exceptions import (
     LLMContextWindowExceededError,
     LLMError,
     LLMRateLimitedError,
-    LLMTimeoutError,
     SessionNotFoundError,
 )
 from agent.core.models.completion import Completion
@@ -742,33 +742,6 @@ async def test_compact_given_unknown_session_raises_session_not_found_error():
 # -- compact: summarizer retried once --------------------------------------------------------
 
 
-async def test_compact_given_summarizer_error_then_success_stores_the_retried_summary():
-    llm_registry = LLMRegistry()
-    summarizer = _FakeLLM(
-        completion=[LLMRateLimitedError("rate limited"), _summary_completion("second try")]
-    )
-    llm_registry.register("summarizer", summarizer)
-    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
-
-    compacted = await service.compact("researcher", session_id)
-
-    assert compacted is True
-    assert await store.get("researcher", session_id) == _compacted(_turn(3), "second try")
-
-
-async def test_compact_given_summarizer_retry_sends_the_same_input_again():
-    llm_registry = LLMRegistry()
-    summarizer = _FakeLLM(completion=[LLMRateLimitedError("rate limited"), _summary_completion()])
-    llm_registry.register("summarizer", summarizer)
-    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
-
-    await service.compact("researcher", session_id)
-
-    assert summarizer.complete_calls[0] == summarizer.complete_calls[1]
-
-
 async def test_compact_given_truncated_summary_then_success_stores_the_retried_summary():
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(
@@ -800,7 +773,7 @@ async def test_compact_given_empty_summary_then_success_stores_the_retried_summa
     assert await store.get("researcher", session_id) == _compacted(_turn(3), "gist")
 
 
-async def test_compact_given_summarizer_fails_twice_stops_after_exactly_two_attempts():
+async def test_compact_given_summarizer_llm_error_gives_up_after_exactly_one_attempt():
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(completion=LLMRateLimitedError("rate limited"))
     llm_registry.register("summarizer", summarizer)
@@ -810,7 +783,7 @@ async def test_compact_given_summarizer_fails_twice_stops_after_exactly_two_atte
     compacted = await service.compact("researcher", session_id)
 
     assert compacted is False
-    assert len(summarizer.complete_calls) == 2
+    assert len(summarizer.complete_calls) == 1
     assert await store.get("researcher", session_id) == _turn(1) + _turn(2) + _turn(3)
 
 
@@ -857,12 +830,12 @@ async def test_compact_given_summarizer_overflow_stores_the_reduced_summary():
     _assert_anthropic_safe_shape(stored)
 
 
-async def test_compact_given_a_chunk_fails_once_then_succeeds_stores_the_reduced_summary():
+async def test_compact_given_a_chunk_produces_unusable_content_once_then_succeeds_stores_the_reduced_summary():  # noqa: E501
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(
         completion=[
             LLMContextWindowExceededError("too big"),  # single pass overflows
-            LLMRateLimitedError("rate limited"),  # chunk 1, attempt 1: transient failure
+            _summary_completion(""),  # chunk 1, attempt 1: empty (unusable) content
             _summary_completion("chunk1"),  # chunk 1, attempt 2 (retry): succeeds
             _summary_completion("chunk2"),  # chunk 2: succeeds first try
             _summary_completion("final"),  # reduce: succeeds first try
@@ -880,14 +853,14 @@ async def test_compact_given_a_chunk_fails_once_then_succeeds_stores_the_reduced
     assert stored == _compacted(_turn(9), "final")
 
 
-async def test_compact_given_the_reduce_call_fails_once_then_succeeds_stores_the_reduced_summary():
+async def test_compact_given_the_reduce_call_produces_unusable_content_once_then_succeeds_stores_the_reduced_summary():  # noqa: E501
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(
         completion=[
             LLMContextWindowExceededError("too big"),  # single pass overflows
             _summary_completion("chunk1"),  # chunk 1: succeeds first try
             _summary_completion("chunk2"),  # chunk 2: succeeds first try
-            LLMTimeoutError("timed out"),  # reduce, attempt 1: transient failure
+            _summary_completion("cut off", finish_reason="length"),  # reduce, attempt 1: truncated
             _summary_completion("final"),  # reduce, attempt 2 (retry): succeeds
         ]
     )
@@ -1014,3 +987,192 @@ async def test_compact_given_a_smaller_chunk_turns_splits_the_old_portion_into_m
     # Four map calls of 2 turns each (2 messages per turn plus the appended prompt), then the
     # single merged reduce call -- two map calls of 5 messages each with the default of 4.
     assert [len(call) for call in chunked] == [5, 5, 5, 5, 1]
+
+
+# -- logging --------------------------------------------------------------------------------
+
+
+async def test_maybe_compact_given_triggered_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register("agent-model", _FakeLLM(max_input_tokens=1000))
+    llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
+    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    service = CompactionService(
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+    )
+    service.record_usage("researcher", session_id, 900)
+
+    await service.maybe_compact("researcher", session_id, "agent-model")
+
+    assert any(r.levelno == logging.INFO and "triggered" in r.message for r in caplog.records)
+
+
+async def test_maybe_compact_given_under_budget_logs_debug(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.DEBUG, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register("agent-model", _FakeLLM(max_input_tokens=1000))
+    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    service = CompactionService(
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+    )
+    service.record_usage("researcher", session_id, 100)
+
+    await service.maybe_compact("researcher", session_id, "agent-model")
+
+    assert any(r.levelno == logging.DEBUG and "under budget" in r.message for r in caplog.records)
+
+
+async def test_maybe_compact_given_unresolvable_window_logs_debug(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.DEBUG, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register(
+        "agent-model", _FakeLLM(max_input_tokens_error=LLMError("no data for this model"))
+    )
+    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    service.record_usage("researcher", session_id, 900)
+
+    await service.maybe_compact("researcher", session_id, "agent-model")
+
+    assert any(r.levelno == logging.DEBUG and "agent-model" in r.message for r in caplog.records)
+
+
+async def test_compact_given_nothing_older_than_keep_window_logs_debug_not_error(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.DEBUG, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
+    store, session_id = await _seeded_store([_turn(1)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=4))
+
+    await service.compact("researcher", session_id)
+
+    # The exact bug this milestone's spec review caught: this benign, expected no-op must
+    # never log at ERROR (or WARNING) -- only DEBUG.
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert any(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+async def test_compact_given_only_a_previous_summary_turn_logs_debug_not_error(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.DEBUG, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion(_RESUMMARY)))
+    store, session_id = await _seeded_store([_compacted([]), _turn(1), _turn(2)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2))
+
+    await service.compact("researcher", session_id)
+
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert any(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+async def test_compact_given_chunked_fallback_engaged_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    summarizer = _FakeLLM(
+        completion=[LLMContextWindowExceededError("too big"), _summary_completion()]
+    )
+    llm_registry.register("summarizer", summarizer)
+    store, session_id = await _seeded_store(_nine_turns())
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+
+    await service.compact("researcher", session_id)
+
+    assert any("chunked" in r.message for r in caplog.records)
+
+
+async def test_compact_given_non_shrinking_summary_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    summarizer = _FakeLLM(completion=_summary_completion("y" * 1000))
+    llm_registry.register("summarizer", summarizer)
+    store, session_id = await _seeded_store([_turn(1), _turn(2)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+
+    await service.compact("researcher", session_id)
+
+    assert any("smaller" in r.message for r in caplog.records)
+
+
+async def test_compact_given_success_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
+    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+
+    await service.compact("researcher", session_id)
+
+    assert any(r.levelno == logging.INFO and "compacted" in r.message for r in caplog.records)
+
+
+async def test_compact_given_truncated_summary_logs_error(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.ERROR, logger="agent.core.services.compaction")
+    llm_registry = LLMRegistry()
+    llm_registry.register(
+        "summarizer", _FakeLLM(completion=_summary_completion(finish_reason="length"))
+    )
+    store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+
+    await service.compact("researcher", session_id)
+
+    [record] = caplog.records
+    assert "max_tokens" in record.message
+
+
+# -- forget / max_sessions eviction ----------------------------------------------------------
+
+
+def test_forget_removes_the_recorded_usage_estimate():
+    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config())
+    service.record_usage("researcher", "sess_1", 1000)
+
+    service.forget("researcher", "sess_1")
+
+    assert service._last_total_tokens.get(("researcher", "sess_1")) is None
+
+
+def test_forget_given_no_recorded_usage_does_not_raise():
+    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config())
+
+    service.forget("researcher", "does-not-exist")  # must not raise
+
+
+async def test_given_max_sessions_none_never_evicts_usage_estimates():
+    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=None)
+
+    for i in range(50):
+        service.record_usage("researcher", f"sess_{i}", 1000)
+
+    assert len(service._last_total_tokens) == 50
+
+
+async def test_given_over_max_sessions_evicts_the_least_recently_recorded_estimate():
+    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=2)
+
+    service.record_usage("researcher", "sess_1", 1000)
+    service.record_usage("researcher", "sess_2", 1000)
+    service.record_usage("researcher", "sess_3", 1000)
+
+    assert ("researcher", "sess_1") not in service._last_total_tokens
+    assert ("researcher", "sess_2") in service._last_total_tokens
+    assert ("researcher", "sess_3") in service._last_total_tokens
+
+
+async def test_re_recording_usage_protects_it_from_the_next_eviction():
+    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=2)
+    service.record_usage("researcher", "sess_1", 1000)
+    service.record_usage("researcher", "sess_2", 1000)
+
+    service.record_usage("researcher", "sess_1", 2000)  # re-touch sess_1
+    service.record_usage("researcher", "sess_3", 1000)
+
+    assert ("researcher", "sess_2") not in service._last_total_tokens
+    assert service._last_total_tokens[("researcher", "sess_1")] == 2000

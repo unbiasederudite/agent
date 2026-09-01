@@ -4,7 +4,14 @@
       "model": "anthropic/claude-3-5-haiku-20241022",
       "temperature": 0.7,
       "top_p": 0.9,
-      "max_tokens": 2000
+      "max_tokens": 2000,
+      "context_window": 200000,
+      "num_retries": 2,
+      "timeout": 60,
+      "retry_base_delay": 1.0,
+      "retry_max_delay": 30.0,
+      "retry_multiplier": 2.0,
+      "max_concurrent_requests": 10
     }
   ],
   "tools": [
@@ -33,7 +40,17 @@
       "max_tool_result_chars": 4000,
       "max_tool_calls_per_round": 5,
       "max_tool_results_total_chars": 20000,
-      "max_input_chars": 20000
+      "max_input_chars": 20000,
+      "allowed_tools": [
+        "get_current_time"
+      ],
+      "allowed_models": [
+        "anthropic/claude-3-5-haiku-20241022"
+      ],
+      "allowed_strategies": [
+        "react"
+      ],
+      "max_request_seconds": 120
     }
   ],
   "base_prompt": "Always respond in plain, professional English.",
@@ -45,6 +62,12 @@
     "prompt": "Summarize the conversation above concisely. Preserve the task's goal, key decisions, established constraints, and any facts or results later turns may need to reference. Omit small talk and resolved intermediate steps."
   },
   "logging": {
-    "level": "INFO"
-  }
+    "level": "INFO",
+    "format": "text",
+    "console": true,
+    "file": "logs/agent.log",
+    "file_max_bytes": 10000000,
+    "file_backup_count": 5
+  },
+  "max_sessions": 1000
 }

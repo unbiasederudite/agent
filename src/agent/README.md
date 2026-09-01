@@ -1,12 +1,9 @@
-# core
+# agent
 
-All agent intelligence. Owns no I/O of its own — `api/` and `adapters/` are thin translators at the edges.
+Root package. See `ARCHITECTURE.md` for the full layering rationale.
 
 ## Contents
 
-- `models/` — Pydantic domain and startup-config models
-- `protocols/` — interfaces for interchangeable implementations
-- `registries/` — runtime name-to-instance maps
-- `factories/` — construct registered instances from config
-- `services/` — use-case orchestration
-- `exceptions/` — the `AgentError` hierarchy
+- `core/` — all agent intelligence; owns no I/O of its own. See `core/README.md`.
+- `api/` — inbound HTTP adapter. See `api/README.md`.
+- `adapters/` — outbound adapters to external systems (LLM providers, etc). See `adapters/README.md`.

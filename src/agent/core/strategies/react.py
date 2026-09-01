@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import time
 from typing import Any
 
 from agent.core.models.message import Message, ToolCall
@@ -9,6 +11,10 @@ from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
+
+logger = logging.getLogger(__name__)
+
+_OMITTED_MARKER = "Error: tool result omitted -- aggregate tool-output budget exhausted"
 
 
 def _tool_schema(tool: ITool) -> dict[str, Any]:
@@ -66,7 +72,7 @@ def _apply_aggregate_budget(
                     role="tool",
                     tool_call_id=message.tool_call_id,
                     name=message.name,
-                    content="Error: tool result omitted -- aggregate tool-output budget exhausted",
+                    content=_OMITTED_MARKER,
                 )
             )
         else:
@@ -75,20 +81,21 @@ def _apply_aggregate_budget(
     return trimmed, total
 
 
+def _tool_result_message(call: ToolCall, content: str) -> Message:
+    """A role="tool" result message for `call`, the shared shape every result uses."""
+    return Message(role="tool", tool_call_id=call.id, name=call.function.name, content=content)
+
+
 def _skipped_call_message(call: ToolCall, max_tool_calls_per_round: int) -> Message:
     """A fixed, non-truncated result for a tool call skipped by `max_tool_calls_per_round`.
 
     Lets the LLM see the call didn't run (and why) instead of silently vanishing -- same
     convention as `_execute_call`'s other fixed, short error strings, never truncated.
     """
-    return Message(
-        role="tool",
-        tool_call_id=call.id,
-        name=call.function.name,
-        content=(
-            f"Error: skipped -- this round requested more than the "
-            f"{max_tool_calls_per_round} tool calls allowed at once"
-        ),
+    return _tool_result_message(
+        call,
+        f"Error: skipped -- this round requested more than the "
+        f"{max_tool_calls_per_round} tool calls allowed at once",
     )
 
 
@@ -107,42 +114,31 @@ async def _execute_call(
     name = call.function.name
     tool = tools.get(name)
     if tool is None:
-        return Message(
-            role="tool",
-            tool_call_id=call.id,
-            name=name,
-            content=f"Error: tool '{name}' was not offered for this call",
-        )
+        logger.warning("tool call named '%s', which was not offered for this call", name)
+        return _tool_result_message(call, f"Error: tool '{name}' was not offered for this call")
     try:
         arguments = json.loads(call.function.arguments)
     except json.JSONDecodeError as exc:
-        return Message(
-            role="tool",
-            tool_call_id=call.id,
-            name=name,
-            content=f"Error: invalid arguments: {exc}",
-        )
+        logger.warning("tool '%s' call had malformed JSON arguments: %s", name, exc)
+        return _tool_result_message(call, f"Error: invalid arguments: {exc}")
     if not isinstance(arguments, dict):
-        return Message(
-            role="tool",
-            tool_call_id=call.id,
-            name=name,
-            content="Error: arguments must be a JSON object",
-        )
+        logger.warning("tool '%s' call arguments were not a JSON object", name)
+        return _tool_result_message(call, "Error: arguments must be a JSON object")
+    logger.info("executing tool '%s'", name)
+    start = time.monotonic()
     try:
         result = await tool.execute(**arguments)
-        return Message(
-            role="tool",
-            tool_call_id=call.id,
-            name=name,
-            content=_truncate(result, max_tool_result_chars),
+        duration_ms = (time.monotonic() - start) * 1000
+        logger.info(
+            "tool '%s' completed in %.1fms, result length %d", name, duration_ms, len(result)
         )
+        return _tool_result_message(call, _truncate(result, max_tool_result_chars))
     except Exception as exc:  # noqa: BLE001 -- tool can raise anything, or violate -> str; never crash
-        return Message(
-            role="tool",
-            tool_call_id=call.id,
-            name=name,
-            content=_truncate(f"Error: {exc}", max_tool_result_chars),
+        logger.warning(
+            "tool '%s' raised: %s", name, exc, extra={"exception_type": type(exc).__name__}
+        )
+        return _tool_result_message(
+            call, _truncate(f"Error: tool '{name}' failed: {exc}", max_tool_result_chars)
         )
 
 
@@ -196,13 +192,27 @@ class ReactStrategy:
         total_usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         tool_results_total_chars = 0
 
-        for _ in range(max_iterations):
+        for iteration in range(1, max_iterations + 1):
+            logger.debug("calling the LLM, iteration %d/%d", iteration, max_iterations)
+            start = time.monotonic()
             completion = await llm.complete(
                 messages,
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
                 tools=tool_schemas,
+            )
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.debug(
+                "LLM responded, iteration %d/%d: finish_reason=%s prompt=%d completion=%d "
+                "total=%d, %.1fms",
+                iteration,
+                max_iterations,
+                completion.finish_reason,
+                completion.usage.prompt_tokens,
+                completion.usage.completion_tokens,
+                completion.usage.total_tokens,
+                duration_ms,
             )
             total_usage = _sum_usage(total_usage, completion.usage)
             if not completion.message.tool_calls:
@@ -217,6 +227,12 @@ class ReactStrategy:
             tool_calls = completion.message.tool_calls
             skipped: list[Message] = []
             if max_tool_calls_per_round is not None and len(tool_calls) > max_tool_calls_per_round:
+                logger.info(
+                    "round requested %d tool calls, more than max_tool_calls_per_round=%d, "
+                    "skipping the rest",
+                    len(tool_calls),
+                    max_tool_calls_per_round,
+                )
                 skipped = [
                     _skipped_call_message(call, max_tool_calls_per_round)
                     for call in tool_calls[max_tool_calls_per_round:]
@@ -228,8 +244,18 @@ class ReactStrategy:
             results, tool_results_total_chars = _apply_aggregate_budget(
                 [*executed, *skipped], tool_results_total_chars, max_tool_results_total_chars
             )
+            if any(message.content == _OMITTED_MARKER for message in results):
+                logger.info(
+                    "aggregate tool-output budget (%s chars) reached this round, omitting the rest",
+                    max_tool_results_total_chars,
+                )
             messages.extend(results)
 
+        logger.warning(
+            "max_iterations (%d) exhausted, forcing a final call without tools", max_iterations
+        )
+        logger.debug("calling the LLM for the forced final answer")
+        start = time.monotonic()
         final = await llm.complete(
             [
                 *messages,
@@ -242,6 +268,16 @@ class ReactStrategy:
             top_p=top_p,
             max_tokens=max_tokens,
             tools=None,
+        )
+        duration_ms = (time.monotonic() - start) * 1000
+        logger.debug(
+            "LLM responded (forced final): finish_reason=%s prompt=%d completion=%d total=%d, "
+            "%.1fms",
+            final.finish_reason,
+            final.usage.prompt_tokens,
+            final.usage.completion_tokens,
+            final.usage.total_tokens,
+            duration_ms,
         )
         total_usage = _sum_usage(total_usage, final.usage)
         messages.append(final.message)

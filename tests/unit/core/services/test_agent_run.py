@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 import pytest
 
 from agent.core.exceptions import (
@@ -6,11 +9,17 @@ from agent.core.exceptions import (
     InputTooLargeError,
     LLMContextWindowExceededError,
     LLMNotFoundError,
+    ModelNotAllowedError,
+    RequestTimeoutError,
+    SessionBusyError,
     SessionNotFoundError,
+    StrategyNotAllowedError,
     StrategyNotFoundError,
+    ToolNotAllowedError,
     ToolNotFoundError,
 )
-from agent.core.models.config import AgentConfig
+from agent.core.models.completion import Completion
+from agent.core.models.config import AgentConfig, CompactionConfig
 from agent.core.models.message import Message
 from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage
@@ -19,7 +28,9 @@ from agent.core.registries.agent import AgentRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
+from agent.core.run_context import current_run_context
 from agent.core.services.agent_run import AgentRunService
+from agent.core.services.compaction import CompactionService
 from agent.core.session_stores.in_memory import InMemorySessionStore
 from agent.core.tools.get_current_time import GetCurrentTimeTool
 
@@ -41,6 +52,7 @@ class _FakeStrategy:
         self.last_max_tool_calls_per_round: int | None = None
         self.last_max_tool_results_total_chars: int | None = None
         self.call_messages: list[list[Message]] = []
+        self.last_run_context: tuple[str, str | None] | None = None
 
     async def run(
         self,
@@ -65,6 +77,7 @@ class _FakeStrategy:
         self.last_max_tool_result_chars = max_tool_result_chars
         self.last_max_tool_calls_per_round = max_tool_calls_per_round
         self.last_max_tool_results_total_chars = max_tool_results_total_chars
+        self.last_run_context = current_run_context()
         self.call_messages.append(messages)
         index = min(self._call_count, len(self._outcomes) - 1)
         self._call_count += 1
@@ -85,12 +98,14 @@ class _FakeCompactionService:
         self.compact_calls: list[tuple[str, str]] = []
         self._compact_result = compact_result
         self._session_store = session_store
+        self.last_run_context: tuple[str, str | None] | None = None
 
     async def maybe_compact(self, agent: str, session_id: str, model: str) -> None:
         self.maybe_compact_calls.append((agent, session_id, model))
 
     def record_usage(self, agent: str, session_id: str, total_tokens: int) -> None:
         self.record_usage_calls.append((agent, session_id, total_tokens))
+        self.last_run_context = current_run_context()
 
     async def compact(self, agent: str, session_id: str) -> bool:
         self.compact_calls.append((agent, session_id))
@@ -655,3 +670,518 @@ async def test_run_given_no_tool_call_and_total_char_caps_passes_none_to_strateg
         None,
         None,
     )
+
+
+async def test_run_given_concurrent_compaction_does_not_lose_a_concurrent_append():
+    # The actual regression this milestone fixes: CompactionService.compact() does
+    # get -> await summarizer -> replace, with an await in the middle. Before the lock,
+    # a concurrent AgentRunService.run() appending to the same session in that window was
+    # silently overwritten by compact()'s stale-based replace(). With the lock, run()'s
+    # append() waits until compact() finishes, then correctly extends the *new* history.
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    # Long enough that the summary actually shrinks it -- compact()'s own anti-shrinkage
+    # guard (new summary+ack chars >= old chars -> refuse) would otherwise make it bail
+    # out with no replace() at all, for a reason unrelated to the lock being tested here.
+    old_message = (
+        "This is a long enough message that summarizing it will actually shrink the "
+        "stored history, unlike a short one-word message."
+    )
+    await session_store.append(
+        "researcher", session_id, [Message(role="user", content=old_message)]
+    )
+
+    summarizer_started = asyncio.Event()
+    release_summarizer = asyncio.Event()
+
+    class _SlowSummarizer:
+        def max_input_tokens(self) -> int:
+            return 1000
+
+        async def complete(
+            self, messages, temperature=None, top_p=None, max_tokens=None, tools=None
+        ) -> Completion:
+            summarizer_started.set()
+            await release_summarizer.wait()
+            return Completion(
+                message=Message(role="assistant", content="a summary"),
+                usage=Usage(prompt_tokens=5, completion_tokens=5, total_tokens=10),
+                finish_reason="stop",
+            )
+
+    llm_registry.register("summarizer", _SlowSummarizer())
+    compaction_service = CompactionService(
+        llm_registry, session_store, CompactionConfig(model="summarizer", keep_recent_turns=0)
+    )
+    strategy = _FakeStrategy(_turn("appended reply"))
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", _researcher_agent())
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        session_store,
+        compaction_service,
+    )
+
+    compact_task = asyncio.create_task(compaction_service.compact("researcher", session_id))
+    await summarizer_started.wait()  # compact() now holds the lock, blocked in the summarizer call
+    run_task = asyncio.create_task(service.run("new message", "researcher", session_id=session_id))
+    await asyncio.sleep(0)  # let run() reach and start waiting on the same lock
+    release_summarizer.set()
+    await compact_task
+    await run_task
+
+    stored = await session_store.get("researcher", session_id)
+    # All three must be present -- neither operation silently clobbered the other.
+    assert any("a summary" in (m.content or "") for m in stored)
+    assert any(m.content == "new message" for m in stored)
+    assert any(m.content == "appended reply" for m in stored)
+
+
+async def test_run_logs_started_and_completed_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)
+
+    await service.run("hi", "researcher")
+
+    assert any("agent run started" in r.message for r in caplog.records)
+    assert any("agent run completed" in r.message for r in caplog.records)
+
+
+async def test_run_given_no_session_id_started_log_says_new(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)
+
+    await service.run("hi", "researcher")
+
+    [started] = [r for r in caplog.records if "agent run started" in r.message]
+    assert "new" in started.message
+
+
+async def test_run_given_existing_session_id_started_log_names_it(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, session_store=session_store)
+
+    await service.run("hi", "researcher", session_id=session_id)
+
+    [started] = [r for r in caplog.records if "agent run started" in r.message]
+    assert session_id in started.message
+
+
+async def test_run_given_input_too_large_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=_researcher_agent(max_input_chars=5))
+
+    with pytest.raises(InputTooLargeError):
+        await service.run("this is too long", "researcher")
+
+    assert any(r.levelno == logging.INFO for r in caplog.records)
+
+
+async def test_run_given_context_window_exceeded_logs_warning(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.WARNING, logger="agent.core.services.agent_run")
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    await session_store.append("researcher", session_id, [Message(role="user", content="hi")])
+    compaction_service = _FakeCompactionService(compact_result=True, session_store=session_store)
+    strategy = _FakeStrategy([LLMContextWindowExceededError("too big"), _turn("recovered")])
+    service = _service(strategy, session_store=session_store, compaction_service=compaction_service)
+
+    await service.run("again", "researcher", session_id=session_id)
+
+    assert any("overflow" in r.message for r in caplog.records)
+
+
+async def test_run_given_reactive_retry_succeeds_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    await session_store.append("researcher", session_id, [Message(role="user", content="hi")])
+    compaction_service = _FakeCompactionService(compact_result=True, session_store=session_store)
+    strategy = _FakeStrategy([LLMContextWindowExceededError("too big"), _turn("recovered")])
+    service = _service(strategy, session_store=session_store, compaction_service=compaction_service)
+
+    await service.run("again", "researcher", session_id=session_id)
+
+    assert any("succeeded" in r.message for r in caplog.records)
+
+
+async def test_run_given_reactive_retry_exhausted_logs_error_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.ERROR, logger="agent.core.services.agent_run")
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    await session_store.append("researcher", session_id, [Message(role="user", content="hi")])
+    compaction_service = _FakeCompactionService(compact_result=True, session_store=session_store)
+    strategy = _FakeStrategy(
+        [LLMContextWindowExceededError("too big"), LLMContextWindowExceededError("still too big")]
+    )
+    service = _service(strategy, session_store=session_store, compaction_service=compaction_service)
+
+    with pytest.raises(CompactionExhaustedError):
+        await service.run("again", "researcher", session_id=session_id)
+
+    [record] = caplog.records
+    assert record.exc_info is not None
+    assert record.exception_type == "CompactionExhaustedError"
+
+
+async def test_run_given_no_overflow_does_not_log_overflow_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.WARNING, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)
+
+    await service.run("hi", "researcher")
+
+    assert caplog.records == []
+
+
+async def test_run_given_session_already_busy_raises_session_busy_error():
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, session_store=session_store)
+
+    async with session_store.busy("researcher", session_id):
+        with pytest.raises(SessionBusyError):
+            await service.run("hello", "researcher", session_id=session_id)
+
+
+async def test_run_given_new_session_does_not_require_it_be_free():
+    session_store = InMemorySessionStore()
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, session_store=session_store)
+
+    run = await service.run("hello", "researcher")  # session_id=None -- nothing to be busy
+
+    assert run.session_id is not None
+
+
+async def test_run_releases_busy_after_completing_so_a_second_call_succeeds():
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, session_store=session_store)
+
+    await service.run("hello", "researcher", session_id=session_id)
+    await service.run("again", "researcher", session_id=session_id)  # must not raise
+
+
+async def test_run_releases_busy_after_an_error_so_a_later_call_succeeds():
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(AgentNotFoundError("nope"))
+    service = _service(strategy, session_store=session_store, agent=_researcher_agent())
+
+    with pytest.raises(Exception):  # noqa: B017, PT011 -- whatever the fake strategy raises
+        await service.run("hello", "researcher", session_id=session_id)
+
+    async with session_store.busy("researcher", session_id):
+        pass  # must not raise SessionBusyError -- the prior call released it
+
+
+async def test_run_given_tool_outside_allowed_tools_raises_tool_not_allowed_error():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_tools=["get_current_time"])
+    tools = _tool_registry()
+    tools.register("other_tool", GetCurrentTimeTool())  # registered globally, not allowed here
+    service = _service(strategy, agent=agent, tools=tools)
+
+    with pytest.raises(ToolNotAllowedError):
+        await service.run("hello", "researcher", tools=["other_tool"])
+
+
+async def test_run_given_tool_outside_allowed_tools_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_tools=["get_current_time"])
+    tools = _tool_registry()
+    tools.register("other_tool", GetCurrentTimeTool())
+    service = _service(strategy, agent=agent, tools=tools)
+
+    with pytest.raises(ToolNotAllowedError):
+        await service.run("hello", "researcher", tools=["other_tool"])
+
+    assert any("not allowed" in r.message for r in caplog.records)
+
+
+async def test_run_given_tool_within_allowed_tools_succeeds():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_tools=["get_current_time"])
+    service = _service(strategy, agent=agent, tools=_tool_registry())
+
+    await service.run("hello", "researcher", tools=["get_current_time"])  # must not raise
+
+
+async def test_run_given_no_allowed_tools_ceiling_permits_any_registered_tool():
+    strategy = _FakeStrategy(_turn())
+    tools = _tool_registry()
+    tools.register("other_tool", GetCurrentTimeTool())
+    service = _service(strategy, tools=tools)  # no allowed_tools set on the default agent
+
+    await service.run("hello", "researcher", tools=["other_tool"])  # must not raise
+
+
+async def test_run_given_model_outside_allowed_models_raises_model_not_allowed_error():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_models=["openai/gpt-4o"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    llm_registry.register("anthropic/claude-sonnet-5", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(ModelNotAllowedError):
+        await service.run("hello", "researcher", model="anthropic/claude-sonnet-5")
+
+
+async def test_run_given_model_outside_allowed_models_logs_info(caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_models=["openai/gpt-4o"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    llm_registry.register("anthropic/claude-sonnet-5", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(ModelNotAllowedError):
+        await service.run("hello", "researcher", model="anthropic/claude-sonnet-5")
+
+    assert any("not allowed" in r.message for r in caplog.records)
+
+
+async def test_run_given_strategy_outside_allowed_strategies_raises_strategy_not_allowed_error():
+    strategy = _FakeStrategy(_turn())
+    other_strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_strategies=["react"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    strategy_registry.register("other", other_strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(StrategyNotAllowedError):
+        await service.run("hello", "researcher", strategy="other")
+
+
+async def test_run_given_strategy_outside_allowed_strategies_logs_info(
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO, logger="agent.core.services.agent_run")
+    strategy = _FakeStrategy(_turn())
+    other_strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_strategies=["react"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    strategy_registry.register("other", other_strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(StrategyNotAllowedError):
+        await service.run("hello", "researcher", strategy="other")
+
+    assert any("not allowed" in r.message for r in caplog.records)
+
+
+async def test_run_given_unregistered_model_with_allowed_models_set_raises_not_found():
+    # An unregistered model must read as "doesn't exist" (404), never "exists but isn't
+    # permitted for this agent" (403) -- registry existence is checked before the
+    # allowed_models ceiling regardless of what that ceiling says.
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_models=["openai/gpt-4o"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(LLMNotFoundError):
+        await service.run("hello", "researcher", model="totally-unregistered-model")
+
+
+async def test_run_given_unregistered_strategy_with_allowed_strategies_set_raises_not_found():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_strategies=["react"])
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", agent)
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+    )
+
+    with pytest.raises(StrategyNotFoundError):
+        await service.run("hello", "researcher", strategy="totally-unregistered-strategy")
+
+
+async def test_run_given_unregistered_tool_with_allowed_tools_set_raises_not_found():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(allowed_tools=["get_current_time"])
+    service = _service(strategy, agent=agent, tools=_tool_registry())
+
+    with pytest.raises(ToolNotFoundError):
+        await service.run("hello", "researcher", tools=["totally-unregistered-tool"])
+
+
+async def test_run_given_strategy_exceeds_max_request_seconds_raises_request_timeout_error():
+    class _SlowStrategy:
+        async def run(self, *args: object, **kwargs: object) -> Turn:
+            await asyncio.sleep(10)
+            return _turn()
+
+    agent = _researcher_agent(max_request_seconds=0.05)
+    service = _service(_SlowStrategy(), agent=agent)
+
+    with pytest.raises(RequestTimeoutError):
+        await service.run("hello", "researcher")
+
+
+async def test_run_given_no_max_request_seconds_does_not_time_out_a_normal_call():
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)  # no max_request_seconds set on the default agent
+
+    run = await service.run("hello", "researcher")  # must not raise
+
+    assert run is not None
+
+
+async def test_run_given_fast_strategy_within_max_request_seconds_succeeds():
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(max_request_seconds=5.0)
+    service = _service(strategy, agent=agent)
+
+    run = await service.run("hello", "researcher")  # must not raise
+
+    assert run is not None
+
+
+async def test_run_given_slow_proactive_compaction_still_respects_max_request_seconds():
+    class _SlowCompactionService(_FakeCompactionService):
+        async def maybe_compact(self, agent: str, session_id: str, model: str) -> None:
+            await asyncio.sleep(10)
+
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(_turn())
+    agent = _researcher_agent(max_request_seconds=0.05)
+    service = _service(
+        strategy,
+        agent=agent,
+        session_store=session_store,
+        compaction_service=_SlowCompactionService(),
+    )
+
+    with pytest.raises(RequestTimeoutError):
+        await service.run("hello", "researcher", session_id=session_id)
+
+
+async def test_run_given_existing_session_sets_run_context_during_strategy_call():
+    session_store = InMemorySessionStore()
+    session_id = await session_store.create("researcher")
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, session_store=session_store)
+
+    await service.run("hello", "researcher", session_id=session_id)
+
+    assert strategy.last_run_context == ("researcher", session_id)
+
+
+async def test_run_given_new_session_sets_run_context_agent_with_no_session_id_yet():
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)
+
+    await service.run("hello", "researcher")
+
+    assert strategy.last_run_context == ("researcher", None)
+
+
+async def test_run_given_new_session_updates_run_context_once_session_is_created():
+    strategy = _FakeStrategy(_turn())
+    compaction_service = _FakeCompactionService()
+    service = _service(strategy, compaction_service=compaction_service)
+
+    run = await service.run("hello", "researcher")
+
+    assert compaction_service.last_run_context == ("researcher", run.session_id)
+
+
+async def test_run_given_completed_call_clears_run_context():
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)
+
+    await service.run("hello", "researcher")
+
+    assert current_run_context() is None

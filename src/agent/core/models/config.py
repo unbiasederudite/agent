@@ -2,17 +2,30 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SamplingDefaults(BaseModel):
     """Sampling-default fields shared by `LLMConfig` and `AgentConfig`."""
 
+    model_config = ConfigDict(extra="forbid")
+
     temperature: float | None = Field(
-        default=None, description="Default sampling temperature, if set."
+        default=None,
+        ge=0,
+        description=(
+            "Default sampling temperature, if set. Only the lower bound is enforced here "
+            "-- the upper bound is provider-specific (2 for OpenAI, 1 for Anthropic), so a "
+            "too-high value is left for the provider itself to reject, matching "
+            "`AgentRunRequest.temperature` in `api/schemas.py`."
+        ),
     )
-    top_p: float | None = Field(default=None, description="Default nucleus sampling value, if set.")
-    max_tokens: int | None = Field(default=None, description="Default max output tokens, if set.")
+    top_p: float | None = Field(
+        default=None, ge=0, le=1, description="Default nucleus sampling value, if set."
+    )
+    max_tokens: int | None = Field(
+        default=None, ge=1, description="Default max output tokens, if set."
+    )
 
 
 class LLMConfig(SamplingDefaults):
@@ -37,14 +50,90 @@ class LLMConfig(SamplingDefaults):
             "correctly. Leave unset to let it be looked up from litellm automatically."
         ),
     )
+    num_retries: int = Field(
+        default=2,
+        ge=0,
+        description="Retries for retriable failures (rate limits, timeouts, connection errors, "
+        "5xx) before giving up. Permanent errors (bad request, auth, not found, etc.) are never "
+        "retried, regardless of this value.",
+    )
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Per-attempt timeout in seconds. None leaves litellm's own default in "
+        "place (120s via LITELLM_TIMEOUT) -- this is a per-model override, not a fallback for "
+        "an otherwise-unbounded call.",
+    )
+    retry_base_delay: float = Field(
+        default=1.0, gt=0, description="Delay before the first retry, in seconds."
+    )
+    retry_max_delay: float = Field(
+        default=30.0, gt=0, description="Cap on delay between retries, in seconds."
+    )
+    retry_multiplier: float = Field(
+        default=2.0, ge=1, description="Backoff multiplier applied to the delay after each retry."
+    )
+    max_concurrent_requests: int | None = Field(
+        default=None,
+        ge=1,
+        description="Cap on concurrent in-flight calls to this model. None means unlimited. A "
+        "request that finds the cap already reached is rejected immediately with "
+        "LLMOverloadedError, never queued.",
+    )
+
+    @model_validator(mode="after")
+    def _max_delay_not_below_base(self) -> "LLMConfig":
+        """Reject a max delay tighter than the base delay.
+
+        Every retry would silently collapse to the max, contradicting the configured
+        base delay.
+        """
+        if self.retry_max_delay < self.retry_base_delay:
+            raise ValueError(
+                f"retry_max_delay ({self.retry_max_delay}) must be >= "
+                f"retry_base_delay ({self.retry_base_delay})"
+            )
+        return self
 
 
 class LoggingConfig(BaseModel):
     """Logging configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Minimum log level to emit."
     )
+    format: Literal["text", "json"] = Field(
+        default="text",
+        description="Text is a single formatted line; json renders each record (and any extra "
+        "structured fields a call site attached) as one JSON object per line.",
+    )
+    console: bool = Field(default=True, description="Whether to log to the console (stderr).")
+    file: str | None = Field(
+        default=None, description="Path to a log file, or None to skip file output."
+    )
+    file_max_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description="Rotate once the file reaches this size, in bytes. None means an uncapped "
+        "single file -- no rotation. Ignored if `file` is unset.",
+    )
+    file_backup_count: int = Field(
+        default=5,
+        ge=0,
+        description="Rotated backups to keep. Only relevant when file_max_bytes is set.",
+    )
+
+    @model_validator(mode="after")
+    def _require_a_destination(self) -> "LoggingConfig":
+        """Reject console=False with no file -- that combination produces zero log output."""
+        if not self.console and self.file is None:
+            raise ValueError(
+                "logging.console is False but logging.file is not set -- "
+                "no log output would ever be produced"
+            )
+        return self
 
 
 class ToolConfig(BaseModel):
@@ -53,6 +142,8 @@ class ToolConfig(BaseModel):
     `name` must match a code-level tool implementation (see `core/factories/app.py`)
     and is also the ToolRegistry lookup key.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description="The tool's lookup key, matching a code-level implementation.")
 
@@ -63,6 +154,8 @@ class StrategyConfig(BaseModel):
     `name` must match a code-level strategy implementation (see `core/factories/app.py`)
     and is also the StrategyRegistry lookup key.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         description="The strategy's lookup key, matching a code-level implementation."
@@ -154,10 +247,68 @@ class AgentConfig(SamplingDefaults):
             "input sizes."
         ),
     )
+    allowed_tools: list[str] | None = Field(
+        default=None,
+        description=(
+            "Ceiling on which tool names a request may ever specify for this agent, "
+            "including as an override -- `None` means unrestricted (any registered tool "
+            "may be requested, current behavior); `[]` means this agent may never use "
+            "tools no matter what a request asks for; a non-empty list means only these "
+            "names are ever permitted, as defaults or as overrides. `tools` must already "
+            "be within this ceiling when both are set."
+        ),
+    )
+    allowed_models: list[str] | None = Field(
+        default=None,
+        description=(
+            "Ceiling on which model names a request may override to for this agent -- "
+            "`None` means unrestricted (current behavior); a non-empty list means only "
+            "these models are ever permitted. No empty-list state (an agent needs some "
+            "model to function). `model` must already be within this ceiling when set."
+        ),
+    )
+    allowed_strategies: list[str] | None = Field(
+        default=None,
+        description=(
+            "Ceiling on which strategy names a request may override to for this agent -- "
+            "same shape and reasoning as `allowed_models`. Primarily a guard against "
+            "exposing a new or externally-sourced strategy implementation (e.g. one "
+            "wrapping an external framework) to every agent the moment it's registered, "
+            "before its IStrategy contract compliance has been verified in practice."
+        ),
+    )
+    max_request_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Overall wall-clock budget for one call to AgentRunService.run(), covering "
+            "every adapter retry/backoff, every tool-calling round, and any reactive "
+            "compaction-and-retry pass together -- `None` means unbounded (current "
+            "behavior). Enforced by a single asyncio.wait_for() wrapper around the whole "
+            "call, not threaded through each inner layer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _defaults_within_ceilings(self) -> "AgentConfig":
+        """Reject a default that falls outside this agent's own configured ceiling."""
+        if self.allowed_tools is not None:
+            outside = [name for name in self.tools if name not in self.allowed_tools]
+            if outside:
+                raise ValueError(f"tools {outside} are not in allowed_tools {self.allowed_tools}")
+        if self.allowed_models is not None and self.model not in self.allowed_models:
+            raise ValueError(f"model '{self.model}' is not in allowed_models {self.allowed_models}")
+        if self.allowed_strategies is not None and self.strategy not in self.allowed_strategies:
+            raise ValueError(
+                f"strategy '{self.strategy}' is not in allowed_strategies {self.allowed_strategies}"
+            )
+        return self
 
 
 class CompactionConfig(BaseModel):
     """Global settings for summarizing a session's older history once it crosses budget."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model: str = Field(
         description=(
@@ -216,6 +367,8 @@ class CompactionConfig(BaseModel):
 class AppConfig(BaseModel):
     """Root startup configuration, loaded once from a JSON file."""
 
+    model_config = ConfigDict(extra="forbid")
+
     llms: list[LLMConfig] = Field(description="The allow-list of LLMs available to this process.")
     agents: list[AgentConfig] = Field(
         default_factory=list, description="The allow-list of agents available to this process."
@@ -246,4 +399,22 @@ class AppConfig(BaseModel):
     )
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig, description="Logging configuration."
+    )
+    max_sessions: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Caps how many distinct (agent, session_id) sessions InMemorySessionStore and "
+            "CompactionService each keep at once. `None` means unbounded (current "
+            "behavior). Once over the cap, the least-recently-touched session is evicted "
+            "-- InMemorySessionStore's stored history and lock together, and separately, "
+            "independently, CompactionService's own size estimate -- these are two "
+            "uncoordinated LRUs sharing the same configured limit, not one coordinated "
+            "eviction event; either can evict a session the other still holds, and that's "
+            "harmless (a missing estimate just skips one proactive check; a missing "
+            "session just reads as not-found). A session actively in use (its lock held, "
+            "or marked busy) is never evicted from InMemorySessionStore -- eviction "
+            "explicitly skips any such entry, never relying merely on it typically being "
+            "the most recently touched."
+        ),
     )

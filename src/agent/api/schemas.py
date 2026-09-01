@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent.core.models.message import Message
 from agent.core.models.usage import Usage
@@ -10,6 +10,8 @@ from agent.core.models.usage import Usage
 
 class AgentRunRequest(BaseModel):
     """Request body for POST /v1/agents/{agent_name}."""
+
+    model_config = ConfigDict(extra="forbid")
 
     message: str = Field(description="The user's message to send to the agent.")
     model: str | None = Field(
@@ -24,13 +26,26 @@ class AgentRunRequest(BaseModel):
         description="Reasoning strategy name overriding the agent's configured strategy.",
     )
     temperature: float | None = Field(
-        default=None, description="Overrides the agent's/LLM's configured default, if set."
+        default=None,
+        ge=0,
+        description=(
+            "Overrides the agent's/LLM's configured default, if set. Only the lower bound "
+            "is enforced here -- the upper bound is provider-specific (2 for OpenAI, 1 for "
+            "Anthropic), so a too-high value is left for the provider itself to reject "
+            "rather than guessed at here and potentially validated wrong for the agent's "
+            "actual configured model."
+        ),
     )
     top_p: float | None = Field(
-        default=None, description="Overrides the agent's/LLM's configured default, if set."
+        default=None,
+        ge=0,
+        le=1,
+        description="Overrides the agent's/LLM's configured default, if set.",
     )
     max_tokens: int | None = Field(
-        default=None, description="Overrides the agent's/LLM's configured default, if set."
+        default=None,
+        ge=1,
+        description="Overrides the agent's/LLM's configured default, if set.",
     )
     tools: list[str] | None = Field(
         default=None,
@@ -67,6 +82,16 @@ class AgentRunResponse(BaseModel):
         description=(
             "The session this response belongs to -- pass it back to continue the conversation."
         )
+    )
+
+
+class SessionHistoryResponse(BaseModel):
+    """Response body for GET /v1/agents/{agent_name}/sessions/{session_id}."""
+
+    session_id: str = Field(description="The session this history belongs to.")
+    messages: list[Message] = Field(
+        description="Every stored message, in order, unfiltered -- every role, including "
+        "tool calls and tool results exactly as stored."
     )
 
 
