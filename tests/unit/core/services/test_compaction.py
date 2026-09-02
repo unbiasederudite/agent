@@ -21,6 +21,7 @@ from agent.core.services.compaction import (
     _chunk_by_turns,
     _split_at_turn_boundary,
 )
+from agent.core.services.context_tracker import ContextFootprintTracker
 from agent.core.session_stores.in_memory import InMemorySessionStore
 
 
@@ -248,7 +249,7 @@ def test_chunk_by_turns_never_separates_a_tool_call_from_its_result():
     assert chunks == [_tool_turn(1), _tool_turn(2)]
 
 
-# -- record_usage / maybe_compact ------------------------------------------------------------
+# -- context_tracker / maybe_compact ---------------------------------------------------------
 
 
 async def test_maybe_compact_given_no_recorded_usage_is_a_noop():
@@ -256,7 +257,8 @@ async def test_maybe_compact_given_no_recorded_usage_is_a_noop():
     llm = _FakeLLM()
     llm_registry.register("agent-model", llm)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -269,10 +271,11 @@ async def test_maybe_compact_given_usage_under_budget_is_a_noop():
     llm = _FakeLLM(max_input_tokens=1000)
     llm_registry.register("agent-model", llm)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 100)
+    tracker.record("researcher", session_id, 100)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -286,10 +289,11 @@ async def test_maybe_compact_given_usage_over_budget_compacts():
     llm_registry.register("agent-model", llm)
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 900)
+    tracker.record("researcher", session_id, 900)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -305,10 +309,11 @@ async def test_maybe_compact_given_per_call_model_uses_that_models_budget():
     llm_registry.register("small-model", small_window_llm)
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 90)  # over 100 * 0.8 = 80
+    tracker.record("researcher", session_id, 90)  # over 100 * 0.8 = 80
 
     await service.maybe_compact("researcher", session_id, "small-model")
 
@@ -322,10 +327,11 @@ async def test_maybe_compact_given_unknown_context_window_is_a_noop():
     llm = _FakeLLM(max_input_tokens_error=LLMError("litellm has no max_input_tokens for model"))
     llm_registry.register("agent-model", llm)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 900)
+    tracker.record("researcher", session_id, 900)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -340,7 +346,8 @@ async def test_compact_given_nothing_older_than_keep_window_returns_false():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=4))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=4), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -353,8 +360,9 @@ async def test_compact_builds_summarizer_call_from_old_messages_and_prompt():
     summarizer = _FakeLLM(completion=_summary_completion())
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, prompt="Summarize this.")
+        llm_registry, store, _config(keep_recent_turns=1, prompt="Summarize this."), tracker
     )
 
     await service.compact("researcher", session_id)
@@ -368,7 +376,8 @@ async def test_compact_prepends_a_summary_turn_before_the_recent_turns():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -383,7 +392,8 @@ async def test_compact_leaves_recent_turns_content_untouched():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -397,7 +407,8 @@ async def test_compact_given_keep_zero_stores_the_summary_and_a_placeholder():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -413,7 +424,8 @@ async def test_compact_given_keep_zero_ends_history_on_an_assistant_message():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -426,7 +438,8 @@ async def test_compact_given_keep_zero_survives_the_next_turns_appended_user():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -443,7 +456,8 @@ async def test_compact_leaves_history_starting_with_a_user_message():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _tool_turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -457,7 +471,8 @@ async def test_compact_leaves_no_two_consecutive_same_role_messages():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _tool_turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -474,7 +489,10 @@ async def test_compact_sends_the_old_portion_to_the_summarizer_with_tool_exchang
     summarizer = _FakeLLM(completion=_summary_completion())
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _tool_turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1, prompt="Sum up."))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(
+        llm_registry, store, _config(keep_recent_turns=1, prompt="Sum up."), tracker
+    )
 
     await service.compact("researcher", session_id)
 
@@ -491,7 +509,8 @@ async def test_compact_given_truncated_summary_returns_false_and_leaves_history(
         "summarizer", _FakeLLM(completion=_summary_completion(finish_reason="length"))
     )
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -517,7 +536,8 @@ async def test_compact_given_contentless_summary_returns_false_and_leaves_histor
     )
     llm_registry.register("summarizer", _FakeLLM(completion=contentless))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -529,7 +549,8 @@ async def test_compact_given_empty_summary_returns_false_and_leaves_history():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("")))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -544,7 +565,8 @@ async def test_compact_given_whitespace_summary_returns_false_and_leaves_history
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("   \n  ")))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -558,7 +580,8 @@ async def test_compact_given_summarizer_overflow_returns_false_and_leaves_histor
         "summarizer", _FakeLLM(completion=LLMContextWindowExceededError("too big"))
     )
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -570,7 +593,8 @@ async def test_compact_given_summarizer_rate_limited_returns_false():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=LLMRateLimitedError("rate limited")))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -585,13 +609,18 @@ async def test_compact_clears_stale_usage_estimate():
     llm_registry.register("agent-model", agent_model)
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 900)  # over 1000 * 0.8 = 800
+    tracker.record("researcher", session_id, 900)  # over 1000 * 0.8 = 800
 
     compacted = await service.compact("researcher", session_id)
     assert compacted is True
+
+    # A successful compact() resets the shared context_tracker's footprint directly -- the old
+    # footprint no longer describes the now-shrunk history.
+    assert tracker.get("researcher", session_id) is None
 
     # The pre-compaction estimate (900) must not linger: with no fresh usage recorded since
     # the compaction, maybe_compact has nothing to compare against and must no-op, even
@@ -614,7 +643,8 @@ async def test_compact_given_only_a_previous_summary_turn_to_resummarize_returns
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_compacted([]), _turn(1), _turn(2)])
     original = await store.get("researcher", session_id)
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -630,7 +660,8 @@ async def test_compact_given_only_a_previous_summary_turn_never_calls_the_summar
     summarizer = _FakeLLM(completion=_summary_completion(_RESUMMARY))
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_compacted([]), _turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -648,7 +679,8 @@ async def test_compact_given_only_a_previous_summary_and_no_recent_turns_still_r
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_compacted([], "an unusually large first summary")])
     original = await store.get("researcher", session_id)
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=0), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -666,10 +698,11 @@ async def test_compact_given_a_non_shrinking_summary_never_clears_the_usage_esti
     summarizer = _FakeLLM(completion=_summary_completion(_RESUMMARY))
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_compacted([]), _turn(1), _turn(2)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=2, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=2, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 900)  # over 1000 * 0.8 = 800
+    tracker.record("researcher", session_id, 900)  # over 1000 * 0.8 = 800
 
     assert await service.compact("researcher", session_id) is False
 
@@ -678,7 +711,7 @@ async def test_compact_given_a_non_shrinking_summary_never_clears_the_usage_esti
     # The estimate survived the refusal, so the proactive check still fires and calls compact
     # a second time -- what matters here. History is unchanged between the two, so both hit
     # the structural fast path and neither spends a summarizer call at all.
-    assert service._last_total_tokens[("researcher", session_id)] == 900
+    assert tracker.get("researcher", session_id) == 900
     assert summarizer.complete_calls == []
 
 
@@ -691,7 +724,8 @@ async def test_compact_given_an_ordinary_two_message_old_portion_still_uses_the_
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
     original = await store.get("researcher", session_id)
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -704,7 +738,8 @@ async def test_compact_given_a_genuinely_smaller_summary_still_replaces_history(
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
     store, session_id = await _seeded_store([_turn(n) for n in range(1, 6)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -721,7 +756,8 @@ async def test_compact_given_a_summary_smaller_by_only_one_character_still_repla
     # 67 fixed chars: the 33-char prefix, its newline, and the 33-char acknowledgment.
     summary = "x" * (old_chars - 67 - 1)
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion(summary)))
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -733,7 +769,8 @@ async def test_compact_given_unknown_session_raises_session_not_found_error():
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store = InMemorySessionStore()
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     with pytest.raises(SessionNotFoundError):
         await service.compact("researcher", "does-not-exist")
@@ -752,7 +789,8 @@ async def test_compact_given_truncated_summary_then_success_stores_the_retried_s
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -765,7 +803,8 @@ async def test_compact_given_empty_summary_then_success_stores_the_retried_summa
     summarizer = _FakeLLM(completion=[_summary_completion(""), _summary_completion("gist")])
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -778,7 +817,8 @@ async def test_compact_given_summarizer_llm_error_gives_up_after_exactly_one_att
     summarizer = _FakeLLM(completion=LLMRateLimitedError("rate limited"))
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -802,7 +842,8 @@ async def test_compact_given_summarizer_overflow_falls_back_to_smaller_chunked_c
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -820,7 +861,8 @@ async def test_compact_given_summarizer_overflow_stores_the_reduced_summary():
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -843,7 +885,8 @@ async def test_compact_given_a_chunk_produces_unusable_content_once_then_succeed
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -866,7 +909,8 @@ async def test_compact_given_the_reduce_call_produces_unusable_content_once_then
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -883,7 +927,10 @@ async def test_compact_given_chunked_fallback_sends_each_chunk_summary_to_the_re
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1, prompt="Sum up."))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(
+        llm_registry, store, _config(keep_recent_turns=1, prompt="Sum up."), tracker
+    )
 
     await service.compact("researcher", session_id)
 
@@ -911,7 +958,8 @@ async def test_compact_given_a_chunk_that_also_overflows_returns_false_and_leave
     )
     store, session_id = await _seeded_store(_nine_turns())
     original = [message for turn in _nine_turns() for message in turn]
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -927,7 +975,8 @@ async def test_compact_given_a_chunk_that_errors_returns_false_and_leaves_histor
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
     original = [message for turn in _nine_turns() for message in turn]
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -948,7 +997,8 @@ async def test_compact_given_the_reduce_call_overflows_returns_false_and_leaves_
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
     original = [message for turn in _nine_turns() for message in turn]
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -963,7 +1013,8 @@ async def test_compact_given_a_single_old_turn_that_overflows_never_chunks_furth
     summarizer = _FakeLLM(completion=LLMContextWindowExceededError("too big"))
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     compacted = await service.compact("researcher", session_id)
 
@@ -979,7 +1030,10 @@ async def test_compact_given_a_smaller_chunk_turns_splits_the_old_portion_into_m
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1, chunk_turns=2))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(
+        llm_registry, store, _config(keep_recent_turns=1, chunk_turns=2), tracker
+    )
 
     await service.compact("researcher", session_id)
 
@@ -998,10 +1052,11 @@ async def test_maybe_compact_given_triggered_logs_info(caplog: pytest.LogCapture
     llm_registry.register("agent-model", _FakeLLM(max_input_tokens=1000))
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 900)
+    tracker.record("researcher", session_id, 900)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -1013,10 +1068,11 @@ async def test_maybe_compact_given_under_budget_logs_debug(caplog: pytest.LogCap
     llm_registry = LLMRegistry()
     llm_registry.register("agent-model", _FakeLLM(max_input_tokens=1000))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
+    tracker = ContextFootprintTracker()
     service = CompactionService(
-        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8)
+        llm_registry, store, _config(keep_recent_turns=1, token_budget_pct=0.8), tracker
     )
-    service.record_usage("researcher", session_id, 100)
+    tracker.record("researcher", session_id, 100)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -1030,8 +1086,9 @@ async def test_maybe_compact_given_unresolvable_window_logs_debug(caplog: pytest
         "agent-model", _FakeLLM(max_input_tokens_error=LLMError("no data for this model"))
     )
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
-    service.record_usage("researcher", session_id, 900)
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
+    tracker.record("researcher", session_id, 900)
 
     await service.maybe_compact("researcher", session_id, "agent-model")
 
@@ -1045,7 +1102,8 @@ async def test_compact_given_nothing_older_than_keep_window_logs_debug_not_error
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion()))
     store, session_id = await _seeded_store([_turn(1)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=4))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=4), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -1062,7 +1120,8 @@ async def test_compact_given_only_a_previous_summary_turn_logs_debug_not_error(
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion(_RESUMMARY)))
     store, session_id = await _seeded_store([_compacted([]), _turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=2), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -1080,7 +1139,8 @@ async def test_compact_given_chunked_fallback_engaged_logs_warning(
     )
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store(_nine_turns())
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -1093,7 +1153,8 @@ async def test_compact_given_non_shrinking_summary_logs_warning(caplog: pytest.L
     summarizer = _FakeLLM(completion=_summary_completion("y" * 1000))
     llm_registry.register("summarizer", summarizer)
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -1105,7 +1166,8 @@ async def test_compact_given_success_logs_info(caplog: pytest.LogCaptureFixture)
     llm_registry = LLMRegistry()
     llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
@@ -1119,60 +1181,10 @@ async def test_compact_given_truncated_summary_logs_error(caplog: pytest.LogCapt
         "summarizer", _FakeLLM(completion=_summary_completion(finish_reason="length"))
     )
     store, session_id = await _seeded_store([_turn(1), _turn(2), _turn(3)])
-    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1))
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
 
     await service.compact("researcher", session_id)
 
     [record] = caplog.records
     assert "max_tokens" in record.message
-
-
-# -- forget / max_sessions eviction ----------------------------------------------------------
-
-
-def test_forget_removes_the_recorded_usage_estimate():
-    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config())
-    service.record_usage("researcher", "sess_1", 1000)
-
-    service.forget("researcher", "sess_1")
-
-    assert service._last_total_tokens.get(("researcher", "sess_1")) is None
-
-
-def test_forget_given_no_recorded_usage_does_not_raise():
-    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config())
-
-    service.forget("researcher", "does-not-exist")  # must not raise
-
-
-async def test_given_max_sessions_none_never_evicts_usage_estimates():
-    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=None)
-
-    for i in range(50):
-        service.record_usage("researcher", f"sess_{i}", 1000)
-
-    assert len(service._last_total_tokens) == 50
-
-
-async def test_given_over_max_sessions_evicts_the_least_recently_recorded_estimate():
-    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=2)
-
-    service.record_usage("researcher", "sess_1", 1000)
-    service.record_usage("researcher", "sess_2", 1000)
-    service.record_usage("researcher", "sess_3", 1000)
-
-    assert ("researcher", "sess_1") not in service._last_total_tokens
-    assert ("researcher", "sess_2") in service._last_total_tokens
-    assert ("researcher", "sess_3") in service._last_total_tokens
-
-
-async def test_re_recording_usage_protects_it_from_the_next_eviction():
-    service = CompactionService(LLMRegistry(), InMemorySessionStore(), _config(), max_sessions=2)
-    service.record_usage("researcher", "sess_1", 1000)
-    service.record_usage("researcher", "sess_2", 1000)
-
-    service.record_usage("researcher", "sess_1", 2000)  # re-touch sess_1
-    service.record_usage("researcher", "sess_3", 1000)
-
-    assert ("researcher", "sess_2") not in service._last_total_tokens
-    assert service._last_total_tokens[("researcher", "sess_1")] == 2000

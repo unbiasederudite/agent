@@ -4,23 +4,18 @@ import pytest
 
 from agent.core.exceptions import SessionBusyError, SessionNotFoundError
 from agent.core.models.message import Message
+from agent.core.models.usage import Usage
+from agent.core.services.context_tracker import ContextFootprintTracker
+from agent.core.services.cost_tracker import CostTracker
 from agent.core.services.session_service import SessionService
 from agent.core.session_stores.in_memory import InMemorySessionStore
-
-
-class _FakeCompactionService:
-    def __init__(self) -> None:
-        self.forget_calls: list[tuple[str, str]] = []
-
-    def forget(self, agent: str, session_id: str) -> None:
-        self.forget_calls.append((agent, session_id))
 
 
 async def test_get_history_returns_stored_messages():
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
     await store.append("researcher", session_id, [Message(role="user", content="hi")])
-    service = SessionService(store, None)
+    service = SessionService(store)
 
     messages = await service.get_history("researcher", session_id)
 
@@ -28,7 +23,7 @@ async def test_get_history_returns_stored_messages():
 
 
 async def test_get_history_given_unknown_session_raises_session_not_found_error():
-    service = SessionService(InMemorySessionStore(), None)
+    service = SessionService(InMemorySessionStore())
 
     with pytest.raises(SessionNotFoundError):
         await service.get_history("researcher", "does-not-exist")
@@ -37,7 +32,7 @@ async def test_get_history_given_unknown_session_raises_session_not_found_error(
 async def test_delete_removes_the_session():
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
-    service = SessionService(store, None)
+    service = SessionService(store)
 
     await service.delete("researcher", session_id)
 
@@ -46,7 +41,7 @@ async def test_delete_removes_the_session():
 
 
 async def test_delete_given_unknown_session_raises_session_not_found_error():
-    service = SessionService(InMemorySessionStore(), None)
+    service = SessionService(InMemorySessionStore())
 
     with pytest.raises(SessionNotFoundError):
         await service.delete("researcher", "does-not-exist")
@@ -55,47 +50,18 @@ async def test_delete_given_unknown_session_raises_session_not_found_error():
 async def test_delete_given_currently_busy_raises_session_busy_error():
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
-    service = SessionService(store, None)
+    service = SessionService(store)
 
     async with store.busy("researcher", session_id):
         with pytest.raises(SessionBusyError):
             await service.delete("researcher", session_id)
 
 
-async def test_delete_forgets_the_compaction_estimate():
-    store = InMemorySessionStore()
-    session_id = await store.create("researcher")
-    compaction_service = _FakeCompactionService()
-    service = SessionService(store, compaction_service)
-
-    await service.delete("researcher", session_id)
-
-    assert compaction_service.forget_calls == [("researcher", session_id)]
-
-
-async def test_delete_given_no_compaction_service_does_not_raise():
-    store = InMemorySessionStore()
-    session_id = await store.create("researcher")
-    service = SessionService(store, None)
-
-    await service.delete("researcher", session_id)  # must not raise
-
-
-async def test_delete_given_unknown_session_does_not_forget_compaction_estimate():
-    compaction_service = _FakeCompactionService()
-    service = SessionService(InMemorySessionStore(), compaction_service)
-
-    with pytest.raises(SessionNotFoundError):
-        await service.delete("researcher", "does-not-exist")
-
-    assert compaction_service.forget_calls == []
-
-
 async def test_delete_logs_info(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.INFO, logger="agent.core.services.session_service")
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
-    service = SessionService(store, None)
+    service = SessionService(store)
 
     await service.delete("researcher", session_id)
 
@@ -106,9 +72,118 @@ async def test_delete_given_unknown_session_does_not_log_success(
     caplog: pytest.LogCaptureFixture,
 ):
     caplog.set_level(logging.INFO, logger="agent.core.services.session_service")
-    service = SessionService(InMemorySessionStore(), None)
+    service = SessionService(InMemorySessionStore())
 
     with pytest.raises(SessionNotFoundError):
         await service.delete("researcher", "does-not-exist")
 
     assert caplog.records == []
+
+
+async def test_delete_forgets_cost_tracker_state():
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    cost_tracker = CostTracker()
+    cost_tracker.record(
+        "researcher",
+        session_id,
+        Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    context_tracker = ContextFootprintTracker()
+    context_tracker.record("researcher", session_id, 2)
+    service = SessionService(store, cost_tracker=cost_tracker, context_tracker=context_tracker)
+
+    await service.delete("researcher", session_id)
+
+    assert cost_tracker.session_usage("researcher", session_id) is None
+    assert context_tracker.get("researcher", session_id) is None
+
+
+async def test_get_usage_returns_recorded_usage():
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    cost_tracker = CostTracker()
+    cost_tracker.record(
+        "researcher",
+        session_id,
+        Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, cost_usd=0.01),
+    )
+    context_tracker = ContextFootprintTracker()
+    context_tracker.record("researcher", session_id, 2)
+    service = SessionService(store, cost_tracker=cost_tracker, context_tracker=context_tracker)
+
+    cumulative, context_tokens = await service.get_usage("researcher", session_id)
+
+    assert cumulative.total_tokens == 2
+    assert cumulative.cost_usd == pytest.approx(0.01)
+    assert context_tokens == 2
+
+
+async def test_get_usage_given_unknown_session_raises_session_not_found_error():
+    service = SessionService(InMemorySessionStore())
+
+    with pytest.raises(SessionNotFoundError):
+        await service.get_usage("researcher", "does-not-exist")
+
+
+async def test_get_usage_given_session_with_no_recorded_usage_returns_zero_usage():
+    """Return zero usage for a session with no recorded usage.
+
+    Defensive case, reachable in real wiring when `max_sessions` is configured:
+    `CostTracker`'s LRU eviction doesn't skip a busy/locked session the way
+    `InMemorySessionStore`'s does, so a session can survive in the store while its
+    `CostTracker` entry gets evicted -- this must not 500 when it happens.
+    """
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    service = SessionService(store)
+
+    cumulative, context_tokens = await service.get_usage("researcher", session_id)
+
+    assert cumulative == Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost_usd=None)
+    assert context_tokens == 0
+
+
+async def test_get_usage_given_usage_recorded_but_no_context_footprint_defaults_footprint_only():
+    """`get_usage()` composes two independent reads -- one missing must not blank the other."""
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    cost_tracker = CostTracker()
+    cost_tracker.record(
+        "researcher",
+        session_id,
+        Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, cost_usd=0.01),
+    )
+    service = SessionService(store, cost_tracker=cost_tracker)
+
+    cumulative, context_tokens = await service.get_usage("researcher", session_id)
+
+    assert cumulative.total_tokens == 2
+    assert cumulative.cost_usd == pytest.approx(0.01)
+    assert context_tokens == 0
+
+
+async def test_get_usage_given_context_footprint_recorded_but_no_usage_defaults_usage_only():
+    """Same independence, the other way round: footprint known, cumulative usage unknown."""
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    context_tracker = ContextFootprintTracker()
+    context_tracker.record("researcher", session_id, 42)
+    service = SessionService(store, context_tracker=context_tracker)
+
+    cumulative, context_tokens = await service.get_usage("researcher", session_id)
+
+    assert cumulative == Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost_usd=None)
+    assert context_tokens == 42
+
+
+async def test_delete_forgets_context_tracker_state_independently_of_cost_tracker():
+    store = InMemorySessionStore()
+    session_id = await store.create("researcher")
+    context_tracker = ContextFootprintTracker()
+    context_tracker.record("researcher", session_id, 42)
+    service = SessionService(store, context_tracker=context_tracker)
+
+    await service.delete("researcher", session_id)
+
+    assert context_tracker.get("researcher", session_id) is None

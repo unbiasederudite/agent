@@ -31,6 +31,8 @@ from agent.core.registries.tool import ToolRegistry
 from agent.core.run_context import current_run_context
 from agent.core.services.agent_run import AgentRunService
 from agent.core.services.compaction import CompactionService
+from agent.core.services.context_tracker import ContextFootprintTracker
+from agent.core.services.cost_tracker import CostTracker
 from agent.core.session_stores.in_memory import InMemorySessionStore
 from agent.core.tools.get_current_time import GetCurrentTimeTool
 
@@ -94,18 +96,12 @@ class _FakeCompactionService:
         session_store: object | None = None,
     ) -> None:
         self.maybe_compact_calls: list[tuple[str, str, str]] = []
-        self.record_usage_calls: list[tuple[str, str, int]] = []
         self.compact_calls: list[tuple[str, str]] = []
         self._compact_result = compact_result
         self._session_store = session_store
-        self.last_run_context: tuple[str, str | None] | None = None
 
     async def maybe_compact(self, agent: str, session_id: str, model: str) -> None:
         self.maybe_compact_calls.append((agent, session_id, model))
-
-    def record_usage(self, agent: str, session_id: str, total_tokens: int) -> None:
-        self.record_usage_calls.append((agent, session_id, total_tokens))
-        self.last_run_context = current_run_context()
 
     async def compact(self, agent: str, session_id: str) -> bool:
         self.compact_calls.append((agent, session_id))
@@ -116,6 +112,18 @@ class _FakeCompactionService:
                 agent, session_id, [Message(role="user", content="summary")]
             )
         return self._compact_result
+
+
+class _FakeCostTracker:
+    """Captures record() calls and the run context active when each one happened."""
+
+    def __init__(self) -> None:
+        self.record_calls: list[tuple[str, str, Usage]] = []
+        self.last_run_context: tuple[str, str | None] | None = None
+
+    def record(self, agent: str, session_id: str, turn_usage: Usage) -> None:
+        self.record_calls.append((agent, session_id, turn_usage))
+        self.last_run_context = current_run_context()
 
 
 def _turn(content: str = "hi there") -> Turn:
@@ -152,6 +160,8 @@ def _service(
     base_prompt: str | None = None,
     session_store: object | None = None,
     compaction_service: object | None = None,
+    cost_tracker: object | None = None,
+    context_tracker: object | None = None,
 ) -> AgentRunService:
     llm_registry = LLMRegistry()
     llm_registry.register("openai/gpt-4o", llm)
@@ -167,6 +177,8 @@ def _service(
         base_prompt,
         session_store if session_store is not None else InMemorySessionStore(),
         compaction_service,
+        cost_tracker=cost_tracker,
+        context_tracker=context_tracker,
     )
 
 
@@ -555,16 +567,33 @@ async def test_run_given_no_session_id_never_calls_maybe_compact():
     assert compaction_service.maybe_compact_calls == []
 
 
-async def test_run_given_compaction_service_records_usage_after_successful_append():
-    compaction_service = _FakeCompactionService()
-    session_store = InMemorySessionStore()
-    session_id = await session_store.create("researcher")
+async def test_run_records_usage_and_context_footprint_in_cost_tracker():
     strategy = _FakeStrategy(_turn())
-    service = _service(strategy, session_store=session_store, compaction_service=compaction_service)
+    cost_tracker = CostTracker()
+    context_tracker = ContextFootprintTracker()
+    llm_registry = LLMRegistry()
+    llm_registry.register("openai/gpt-4o", object())
+    agent_registry = AgentRegistry()
+    agent_registry.register("researcher", _researcher_agent())
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("react", strategy)
+    service = AgentRunService(
+        llm_registry,
+        agent_registry,
+        ToolRegistry(),
+        strategy_registry,
+        None,
+        InMemorySessionStore(),
+        cost_tracker=cost_tracker,
+        context_tracker=context_tracker,
+    )
 
-    run = await service.run("hi", "researcher", session_id=session_id)
+    run = await service.run("hello", "researcher")
 
-    assert compaction_service.record_usage_calls == [("researcher", run.session_id, 5)]
+    result = cost_tracker.session_usage("researcher", run.session_id)
+    assert result is not None
+    assert result.total_tokens == _turn().usage.total_tokens
+    assert context_tracker.get("researcher", run.session_id) == 5
 
 
 async def test_run_given_context_window_exceeded_compacts_and_retries_once():
@@ -713,7 +742,10 @@ async def test_run_given_concurrent_compaction_does_not_lose_a_concurrent_append
 
     llm_registry.register("summarizer", _SlowSummarizer())
     compaction_service = CompactionService(
-        llm_registry, session_store, CompactionConfig(model="summarizer", keep_recent_turns=0)
+        llm_registry,
+        session_store,
+        CompactionConfig(model="summarizer", keep_recent_turns=0),
+        ContextFootprintTracker(),
     )
     strategy = _FakeStrategy(_turn("appended reply"))
     agent_registry = AgentRegistry()
@@ -1170,12 +1202,12 @@ async def test_run_given_new_session_sets_run_context_agent_with_no_session_id_y
 
 async def test_run_given_new_session_updates_run_context_once_session_is_created():
     strategy = _FakeStrategy(_turn())
-    compaction_service = _FakeCompactionService()
-    service = _service(strategy, compaction_service=compaction_service)
+    cost_tracker = _FakeCostTracker()
+    service = _service(strategy, cost_tracker=cost_tracker)
 
     run = await service.run("hello", "researcher")
 
-    assert compaction_service.last_run_context == ("researcher", run.session_id)
+    assert cost_tracker.last_run_context == ("researcher", run.session_id)
 
 
 async def test_run_given_completed_call_clears_run_context():

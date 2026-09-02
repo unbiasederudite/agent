@@ -988,3 +988,29 @@ async def test_complete_given_retriable_failure_applies_jitter_to_the_delay(
 
     delay = mock_sleep.call_args_list[0].args[0]
     assert 5.0 <= delay < 10.0  # base_delay=10.0 * uniform(0.5, 1.0), never the bare 10.0
+
+
+async def test_complete_given_known_model_sets_cost_usd(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    monkeypatch.setattr("litellm.completion_cost", lambda **kwargs: 0.00123)
+    adapter = LiteLLMAdapter("openai/gpt-4o")
+
+    completion = await adapter.complete([Message(role="user", content="hi")])
+
+    assert completion.usage.cost_usd == pytest.approx(0.00123)
+
+
+async def test_complete_given_unpriced_model_sets_cost_usd_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+
+    def _raise(**kwargs: Any) -> float:
+        raise Exception("model not mapped yet")
+
+    monkeypatch.setattr("litellm.completion_cost", _raise)
+    adapter = LiteLLMAdapter("openai/gpt-4o")
+
+    completion = await adapter.complete([Message(role="user", content="hi")])
+
+    assert completion.usage.cost_usd is None

@@ -45,8 +45,10 @@ uv run python -m agent.api --config config.json
 |---|---|---|
 | `POST` | `/v1/agents/{agent_name}` | Run `agent_name` against `message`. Body: `message` (required, a plain string), `model`/`strategy`/`temperature`/`top_p`/`max_tokens` (optional overrides), `tools` (optional, tri-state: omitted uses the agent's configured tools, `[]` suppresses them, a list overrides them), `session_id` (optional -- omit to start a new conversation, pass a prior response's `session_id` back to continue it). If the LLM requests a tool call, it is executed and fed back automatically (up to the agent's `max_tool_iterations`) before a response is returned. Returns `model`, `message`, `usage`, `finish_reason`, `session_id`. Rejects a concurrent second request against the same `session_id` outright (see Errors' `session_busy` row) rather than letting it run against stale history. |
 | `GET` | `/v1/agents/{agent_name}/sessions/{session_id}` | Return the full stored history for this session: `session_id`, `messages` (every stored message, in order, unfiltered -- every role, including tool calls and tool results exactly as stored). |
+| `GET` | `/v1/agents/{agent_name}/sessions/{session_id}/usage` | Return token/cost usage for this session: `session_id`, `cumulative` (`Usage` summed across every run against this session), `context_tokens` (footprint of the full stored history as of the last run, `0` if not currently known). |
 | `DELETE` | `/v1/agents/{agent_name}/sessions/{session_id}` | Permanently remove this session and its stored history. `204` on success, no body. |
 | `GET` | `/v1/agents` | List registered agents: `name`, `model`, `strategy`, `tools`. |
+| `GET` | `/v1/agents/{agent_name}/usage` | Return cumulative token/cost usage for this agent across all its sessions: `agent`, `cumulative` (`Usage`, all-zero if never run). |
 | `GET` | `/v1/tools` | List registered tools: `name`, `description`, `parameters` (JSON schema). |
 | `GET` | `/v1/models` | List registered model id strings. |
 | `GET` | `/v1/strategies` | List registered reasoning strategy names (valid values for `strategy`). |

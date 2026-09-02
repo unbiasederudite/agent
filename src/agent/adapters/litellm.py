@@ -295,12 +295,20 @@ class LiteLLMAdapter:
                 content = choice.message.content or None
                 if content is None and tool_calls is None:
                     raise LLMError("litellm returned a message with neither content nor tool_calls")
+                try:
+                    # Rounded to clean up binary-float noise (e.g. 6.5999999999999995e-06
+                    # instead of 6.6e-06) -- 10dp is far below any realistic per-call cost
+                    # while still well above where that noise appears.
+                    cost_usd = round(litellm.completion_cost(completion_response=response), 10)
+                except Exception:
+                    cost_usd = None
                 return Completion(
                     message=Message(role="assistant", content=content, tool_calls=tool_calls),
                     usage=Usage(
                         prompt_tokens=response.usage.prompt_tokens,
                         completion_tokens=response.usage.completion_tokens,
                         total_tokens=response.usage.total_tokens,
+                        cost_usd=cost_usd,
                     ),
                     finish_reason=choice.finish_reason,
                 )

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from agent.core.models.message import Message, ToolCall
 from agent.core.models.turn import Turn
-from agent.core.models.usage import Usage
+from agent.core.models.usage import Usage, sum_usage
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
 
@@ -31,15 +31,6 @@ def _tool_schema(tool: ITool) -> dict[str, Any]:
             "parameters": tool.parameters_model.model_json_schema(),
         },
     }
-
-
-def _sum_usage(a: Usage, b: Usage) -> Usage:
-    """Add two Usage totals together, field by field."""
-    return Usage(
-        prompt_tokens=a.prompt_tokens + b.prompt_tokens,
-        completion_tokens=a.completion_tokens + b.completion_tokens,
-        total_tokens=a.total_tokens + b.total_tokens,
-    )
 
 
 def _truncate(content: str, max_chars: int | None) -> str:
@@ -257,7 +248,7 @@ class ReactStrategy:
                 completion.usage.total_tokens,
                 duration_ms,
             )
-            total_usage = _sum_usage(total_usage, completion.usage)
+            total_usage = sum_usage(total_usage, completion.usage)
             if not completion.message.tool_calls:
                 messages.append(completion.message)
                 return Turn(
@@ -322,7 +313,7 @@ class ReactStrategy:
             final.usage.total_tokens,
             duration_ms,
         )
-        total_usage = _sum_usage(total_usage, final.usage)
+        total_usage = sum_usage(total_usage, final.usage)
         messages.append(final.message)
         return Turn(
             messages=messages[input_length:],

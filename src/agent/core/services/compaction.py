@@ -1,7 +1,6 @@
 """Compaction: keeps a session's stored history under a configured token budget."""
 
 import logging
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Literal
 
@@ -11,6 +10,7 @@ from agent.core.models.message import Message
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.isession_store import ISessionStore
 from agent.core.registries.llm import LLMRegistry
+from agent.core.services.context_tracker import ContextFootprintTracker
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +101,11 @@ class _SummaryOutcome:
 class CompactionService:
     """Keeps a session's stored history under its configured token budget.
 
-    Owns the lagged usage estimate as its own private, non-durable state -- not part of
-    `ISessionStore` (that's message data only), not a separate cache object either. Lost on
-    restart, same posture `InMemorySessionStore` already has.
+    Reads the session's current context-token footprint from `ContextFootprintTracker` --
+    the single source of truth for that number, written by `AgentRunService` once per
+    turn -- rather than keeping its own private copy. This service depends on the tracker
+    for that one read (`get()`) and to reset it after a successful `compact()` (`forget()`);
+    the tracker has no reciprocal dependency on this service, or on `CostTracker`.
     """
 
     def __init__(
@@ -111,7 +113,7 @@ class CompactionService:
         llm_registry: LLMRegistry,
         session_store: ISessionStore,
         config: CompactionConfig,
-        max_sessions: int | None = None,
+        context_tracker: ContextFootprintTracker,
     ) -> None:
         """Initialize CompactionService.
 
@@ -120,49 +122,26 @@ class CompactionService:
                 the agent's own model (for the budget check) and the configured summarizer.
             session_store: Per-conversation message history storage.
             config: Compaction settings (summarizer model, budget, keep-window, prompt).
-            max_sessions: Caps how many (agent, session_id) usage estimates are kept at
-                once, independently of ISessionStore's own cap on the same value -- see
-                `record_usage`. `None` means unbounded.
+            context_tracker: Source of truth for each session's current context-token
+                footprint -- this service only ever reads it (`maybe_compact`) and resets a
+                session's entry after a successful `compact()` (the old footprint no longer
+                describes the now-shrunk history); `AgentRunService` is the only writer.
         """
         self._llm_registry = llm_registry
         self._session_store = session_store
         self._config = config
-        self._last_total_tokens: OrderedDict[tuple[str, str], int] = OrderedDict()
-        self._max_sessions = max_sessions
-
-    def record_usage(self, agent: str, session_id: str, total_tokens: int) -> None:
-        """Record this turn's ending size as the estimate for the next turn's check.
-
-        Bounded by `max_sessions` via LRU eviction, independently of `ISessionStore`'s own
-        cap on the same value -- no cross-object coordination needed: a missing estimate
-        for a session that still exists just makes `maybe_compact` skip its proactive
-        check for one turn (already-existing, best-effort behavior for a session's very
-        first turn), and the reactive overflow catch in `AgentRunService.run()` remains
-        the real safety net regardless.
-        """
-        key = (agent, session_id)
-        self._last_total_tokens[key] = total_tokens
-        self._last_total_tokens.move_to_end(key)
-        if self._max_sessions is not None and len(self._last_total_tokens) > self._max_sessions:
-            self._last_total_tokens.popitem(last=False)
-
-    def forget(self, agent: str, session_id: str) -> None:
-        """Discard the recorded usage estimate for `(agent, session_id)`, if any.
-
-        Called when a session is deleted -- a no-op, not an error, if there was never a
-        recorded estimate for it (e.g. a session deleted before its first turn ended).
-        """
-        self._last_total_tokens.pop((agent, session_id), None)
+        self._context_tracker = context_tracker
 
     async def maybe_compact(self, agent: str, session_id: str, model: str) -> None:
         """Compact now if the last-recorded size is over budget for `model`.
 
-        No-op if there's no recorded usage yet for `(agent, session_id)`, or if `model`'s
-        context window isn't known (e.g. a self-hosted or fine-tuned model litellm's static
-        data doesn't recognize) -- the reactive fallback in AgentRunService still catches a
-        real overflow when one actually happens; this proactive check is best-effort only.
+        No-op if there's no recorded footprint yet for `(agent, session_id)` (see
+        `ContextFootprintTracker`), or if `model`'s context window isn't known (e.g. a
+        self-hosted or fine-tuned model litellm's static data doesn't recognize) -- the
+        reactive fallback in AgentRunService still catches a real overflow when one
+        actually happens; this proactive check is best-effort only.
         """
-        last = self._last_total_tokens.get((agent, session_id))
+        last = self._context_tracker.get(agent, session_id)
         if last is None:
             return
         try:
@@ -198,8 +177,8 @@ class CompactionService:
     async def compact(self, agent: str, session_id: str) -> bool:
         """Summarize the old portion of `(agent, session_id)`'s history, if there is one.
 
-        Called both proactively (via `maybe_compact`, once the lagged usage estimate is over
-        budget) and reactively (by `AgentRunService`, after an `LLMContextWindowExceededError`
+        Called both proactively (via `maybe_compact`, once the tracked context footprint is
+        over budget) and reactively (by `AgentRunService`, after an `LLMContextWindowExceededError`
         forces compaction regardless of budget) -- same behavior either way. Always uses
         `CompactionConfig.keep_recent_turns` -- the most recent turns it protects are never
         summarized away by any caller, under any circumstance, including on a reactive retry;
@@ -298,7 +277,7 @@ class CompactionService:
             # case where a timeout in the caller's subsequent LLM call leaves this rewrite
             # committed with no signal back to the caller that it happened.
             await self._session_store.replace(agent, session_id, new_history)
-            self._last_total_tokens.pop((agent, session_id), None)
+            self._context_tracker.forget(agent, session_id)
             logger.info(
                 "compacted (%s, %s): %d -> %d chars, %d turn(s) kept verbatim",
                 agent,

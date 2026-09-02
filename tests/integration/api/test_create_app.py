@@ -740,3 +740,69 @@ def test_create_app_given_max_sessions_wires_it_into_the_session_store(
     get_second = client.get(f"/v1/agents/researcher/sessions/{second.json()['session_id']}")
     assert get_first.status_code == 404  # evicted -- max_sessions=1
     assert get_second.status_code == 200
+
+
+def test_get_session_usage_returns_cumulative_and_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    monkeypatch.setattr("litellm.completion_cost", lambda **kwargs: 0.001)
+    app = create_app(_agent_config_path(tmp_path))
+    client = TestClient(app)
+    run_response = client.post("/v1/agents/researcher", json={"message": "hello"})
+    session_id = run_response.json()["session_id"]
+
+    response = client.get(f"/v1/agents/researcher/sessions/{session_id}/usage")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == session_id
+    assert body["cumulative"]["total_tokens"] == 15
+    assert float(body["cumulative"]["cost_usd"]) == pytest.approx(0.001)
+    assert body["context_tokens"] == 15
+
+
+def test_get_session_usage_given_unknown_session_returns_404(tmp_path: Path):
+    app = create_app(_agent_config_path(tmp_path))
+    client = TestClient(app)
+
+    response = client.get("/v1/agents/researcher/sessions/does-not-exist/usage")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"
+
+
+def test_get_agent_usage_returns_cumulative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
+    monkeypatch.setattr("litellm.completion_cost", lambda **kwargs: 0.001)
+    app = create_app(_agent_config_path(tmp_path))
+    client = TestClient(app)
+    client.post("/v1/agents/researcher", json={"message": "hello"})
+
+    response = client.get("/v1/agents/researcher/usage")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent"] == "researcher"
+    assert body["cumulative"]["total_tokens"] == 15
+    assert float(body["cumulative"]["cost_usd"]) == pytest.approx(0.001)
+
+
+def test_get_agent_usage_given_unregistered_agent_returns_404(tmp_path: Path):
+    app = create_app(_agent_config_path(tmp_path))
+    client = TestClient(app)
+
+    response = client.get("/v1/agents/nonexistent/usage")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "agent_not_found"
+
+
+def test_get_agent_usage_given_never_run_returns_zero_usage(tmp_path: Path):
+    app = create_app(_agent_config_path(tmp_path))
+    client = TestClient(app)
+
+    response = client.get("/v1/agents/researcher/usage")
+
+    assert response.status_code == 200
+    assert response.json()["cumulative"]["total_tokens"] == 0

@@ -20,7 +20,9 @@ from agent.api.schemas import (
     AgentRunRequest,
     AgentRunResponse,
     AgentSummary,
+    AgentUsageResponse,
     SessionHistoryResponse,
+    SessionUsageResponse,
     ToolSummary,
 )
 from agent.core.exceptions import (
@@ -52,6 +54,8 @@ from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
 from agent.core.services.agent_run import AgentRunService
 from agent.core.services.compaction import CompactionService
+from agent.core.services.context_tracker import ContextFootprintTracker
+from agent.core.services.cost_tracker import CostTracker
 from agent.core.services.session_service import SessionService
 from agent.core.session_stores.in_memory import InMemorySessionStore
 
@@ -305,13 +309,14 @@ def add_health_route(app: FastAPI) -> None:
 
 
 def add_session_routes(app: FastAPI, session_service: SessionService) -> None:
-    """Register GET and DELETE /v1/agents/{agent_name}/sessions/{session_id} on `app`.
+    """Register GET/DELETE /v1/agents/{agent_name}/sessions/{session_id} and its /usage.
 
-    An unknown `agent_name` reads as "session not found" for both routes, the same as
+    An unknown `agent_name` reads as "session not found" for all three routes, the same as
     `ISessionStore`'s own dict-key semantics -- no separate agent-registry lookup is
-    needed here. Both routes are pure translation -- the busy-guard-plus-delete-plus-forget
-    sequencing lives in `SessionService` (`core/services/`), not here, so a future `cli/`
-    inbound adapter reuses it rather than having to rediscover it.
+    needed here. All three routes are pure translation -- the busy-guard-plus-delete-
+    plus-forget sequencing and the cumulative-usage/context-footprint lookup both live in
+    `SessionService` (`core/services/`), not here, so a future `cli/` inbound adapter
+    reuses them rather than having to rediscover them.
     """
 
     @app.get("/v1/agents/{agent_name}/sessions/{session_id}")
@@ -323,6 +328,20 @@ def add_session_routes(app: FastAPI, session_service: SessionService) -> None:
                 status_code=404, detail={"message": str(exc), "code": "session_not_found"}
             ) from exc
         return SessionHistoryResponse(session_id=session_id, messages=messages)
+
+    @app.get("/v1/agents/{agent_name}/sessions/{session_id}/usage")
+    async def get_session_usage(agent_name: str, session_id: str) -> SessionUsageResponse:
+        try:
+            cumulative, context_tokens = await session_service.get_usage(agent_name, session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail={"message": str(exc), "code": "session_not_found"}
+            ) from exc
+        return SessionUsageResponse(
+            session_id=session_id,
+            cumulative=cumulative,
+            context_tokens=context_tokens,
+        )
 
     @app.delete("/v1/agents/{agent_name}/sessions/{session_id}", status_code=204)
     async def delete_session(agent_name: str, session_id: str) -> None:
@@ -336,6 +355,22 @@ def add_session_routes(app: FastAPI, session_service: SessionService) -> None:
             raise HTTPException(
                 status_code=409, detail={"message": str(exc), "code": "session_busy"}
             ) from exc
+
+
+def add_usage_routes(
+    app: FastAPI, agent_registry: AgentRegistry, cost_tracker: CostTracker
+) -> None:
+    """Register GET /v1/agents/{agent_name}/usage on `app`."""
+
+    @app.get("/v1/agents/{agent_name}/usage")
+    async def get_agent_usage(agent_name: str) -> AgentUsageResponse:
+        try:
+            agent_registry.get(agent_name)
+        except AgentNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail={"message": str(exc), "code": "agent_not_found"}
+            ) from exc
+        return AgentUsageResponse(agent=agent_name, cumulative=cost_tracker.agent_usage(agent_name))
 
 
 def create_app(config_path: Path) -> FastAPI:
@@ -363,8 +398,10 @@ def create_app(config_path: Path) -> FastAPI:
     ) = build_registries(config)
     configure_logging(logging_config, RequestIdFilter(), RunContextFilter())
     session_store = InMemorySessionStore(max_sessions=max_sessions)
+    cost_tracker = CostTracker(max_sessions=max_sessions)
+    context_tracker = ContextFootprintTracker(max_sessions=max_sessions)
     compaction_service = (
-        CompactionService(llm_registry, session_store, compaction_config, max_sessions=max_sessions)
+        CompactionService(llm_registry, session_store, compaction_config, context_tracker)
         if compaction_config is not None
         else None
     )
@@ -376,8 +413,12 @@ def create_app(config_path: Path) -> FastAPI:
         base_prompt,
         session_store,
         compaction_service,
+        cost_tracker=cost_tracker,
+        context_tracker=context_tracker,
     )
-    session_service = SessionService(session_store, compaction_service)
+    session_service = SessionService(
+        session_store, cost_tracker=cost_tracker, context_tracker=context_tracker
+    )
 
     app = FastAPI()
     app.add_middleware(RequestIdMiddleware)
@@ -386,6 +427,7 @@ def create_app(config_path: Path) -> FastAPI:
     add_registry_routes(app, agent_registry, tool_registry, llm_registry, strategy_registry)
     add_health_route(app)
     add_session_routes(app, session_service)
+    add_usage_routes(app, agent_registry, cost_tracker)
     logger.info(
         "agent-core started: %d agent(s), %d tool(s), %d LLM(s), %d strategy(s), compaction=%s",
         len(agent_registry.all()),

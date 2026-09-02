@@ -24,6 +24,8 @@ from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
 from agent.core.run_context import run_context, update_session_id
 from agent.core.services.compaction import CompactionService
+from agent.core.services.context_tracker import ContextFootprintTracker
+from agent.core.services.cost_tracker import CostTracker
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class AgentRunService:
         base_prompt: str | None,
         session_store: ISessionStore,
         compaction_service: CompactionService | None = None,
+        cost_tracker: CostTracker | None = None,
+        context_tracker: ContextFootprintTracker | None = None,
     ) -> None:
         """Initialize AgentRunService with its registries.
 
@@ -61,6 +65,17 @@ class AgentRunService:
             session_store: Per-conversation message history storage.
             compaction_service: Keeps a session's history under a token budget. `None`
                 disables compaction entirely -- no proactive check, no reactive fallback.
+            cost_tracker: Tracks cumulative per-session/per-agent token and cost usage --
+                this service is the sole writer, via one `record()` call after every
+                successful run. `None` constructs a private, disposable instance -- every
+                real caller (`create_app()`) always passes the shared instance explicitly;
+                this default exists only so callers that don't care about usage tracking
+                (most existing tests) aren't forced to construct and pass one just to
+                compile.
+            context_tracker: Tracks each session's current context-token footprint (a
+                separate concern from cumulative usage -- see `ContextFootprintTracker`'s
+                own docstring). Same sole-writer, private-instance-by-default rationale as
+                `cost_tracker`.
         """
         self._llm_registry = llm_registry
         self._agent_registry = agent_registry
@@ -69,6 +84,10 @@ class AgentRunService:
         self._base_prompt = base_prompt
         self._session_store = session_store
         self._compaction_service = compaction_service
+        self._cost_tracker = cost_tracker if cost_tracker is not None else CostTracker()
+        self._context_tracker = (
+            context_tracker if context_tracker is not None else ContextFootprintTracker()
+        )
 
     async def run(
         self,
@@ -345,8 +364,8 @@ class AgentRunService:
             update_session_id(session_id)
         async with self._session_store.lock(agent, session_id):
             await self._session_store.append(agent, session_id, [user_message, *turn.messages])
-        if self._compaction_service is not None:
-            self._compaction_service.record_usage(agent, session_id, turn.final_total_tokens)
+        self._cost_tracker.record(agent, session_id, turn.usage)
+        self._context_tracker.record(agent, session_id, turn.final_total_tokens)
 
         duration_ms = (time.monotonic() - start) * 1000
         logger.info(

@@ -12,7 +12,7 @@ from agent.core.session_stores.in_memory import InMemorySessionStore
 def _client_for(store: InMemorySessionStore) -> TestClient:
     app = FastAPI()
     add_exception_handlers(app)
-    add_session_routes(app, SessionService(store, None))
+    add_session_routes(app, SessionService(store))
     return TestClient(app, raise_server_exceptions=False)
 
 

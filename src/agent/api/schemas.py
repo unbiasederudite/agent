@@ -95,6 +95,30 @@ class SessionHistoryResponse(BaseModel):
     )
 
 
+class SessionUsageResponse(BaseModel):
+    """Response body for GET /v1/agents/{agent_name}/sessions/{session_id}/usage."""
+
+    session_id: str = Field(description="The session this usage belongs to.")
+    cumulative: Usage = Field(
+        description="Token and cost totals summed across every run against this session."
+    )
+    context_tokens: int = Field(
+        description="Token footprint of the full stored history as of the last run."
+    )
+
+
+class AgentUsageResponse(BaseModel):
+    """Response body for GET /v1/agents/{agent_name}/usage."""
+
+    agent: str = Field(description="The agent this usage belongs to.")
+    cumulative: Usage = Field(
+        description=(
+            "Token and cost totals summed across every run against this agent, across "
+            "all its sessions. All-zero if this agent has never been run."
+        )
+    )
+
+
 class AgentSummary(BaseModel):
     """One entry in the GET /v1/agents listing."""
 

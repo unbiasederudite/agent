@@ -17,6 +17,7 @@ def test_agent_runs_given_agent_uses_its_model_and_persona():
     body = response.json()
     assert body["model"] == "openai/gpt-4o-mini"
     assert "pong" in body["message"]["content"].lower()
+    assert body["usage"]["cost_usd"] is not None
 
 
 def test_list_agents_given_real_config_returns_all_agents():
