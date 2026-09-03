@@ -1,10 +1,14 @@
 # Architecture
 
-## Folder Responsibility
+agent/core separates all agent reasoning from the transports that expose it. This document
+describes that separation and the invariants that hold it together — read it before any
+change that touches more than one folder.
+
+## Building Blocks
 
 | Folder | Purpose |
 |---|---|
-| `src/agent/cli/` | Inbound adapter — terminal interaction |
+| `src/agent/cli/` | Inbound adapter — terminal interaction (planned, not yet implemented) |
 | `src/agent/api/` | Inbound adapter — HTTP interaction |
 | `src/agent/core/` | All agent intelligence |
 | `src/agent/core/exceptions/` | Full exception hierarchy rooted at `AgentError` |
@@ -22,76 +26,103 @@
 | `tests/integration/` | Adapter wiring tests — all externals mocked |
 | `tests/e2e/` | Real-runtime smoke tests — never in CI |
 
-`core/` is a deliberate boundary, not just another folder: it owns all agent intelligence. `cli/`, `api/`, and `adapters/` are thin — they translate at the edges and contain no reasoning of their own.
+`core/` is a deliberate boundary, not just another folder: it owns all agent intelligence.
+`cli/`, `api/`, and `adapters/` are thin — they translate at the edges and contain no
+reasoning of their own.
 
 ---
 
-## Inbound vs Outbound Adapters
+## Boundaries
 
-- **Inbound adapters** — `cli/` and `api/`. The outside world calls **into** the core through these. Each one's job: translate its own input into a call against `core/services/`, and translate the result back into its own output format.
-- **Outbound adapters** — `adapters/`. The core calls **out** through these, to an LLM provider, a tool's REST client, a database.
-
-Inbound adapters are siblings of each other, never nested inside one another, and `core/` never depends on any of them.
-
-Each inbound adapter is a separate `[project.optional-dependencies]` extra with its own entry point. `pip install agent-core` installs zero adapter-specific dependencies — a deployment installs only the extra it needs.
-
----
-
-## Dependency Flow
+- **Inbound adapters** (`cli/`, `api/`) — the outside world calls **into** the core through
+  these. Each translates its own input into a call against `core/services/`, and the result
+  back into its own output format. They are siblings, never nested inside one another, and
+  `core/` never depends on any of them.
+- **Outbound adapters** (`adapters/`) — the core calls **out** through these, to an LLM
+  provider, a tool's REST client, a database. They implement `core/protocols/` interfaces.
+- Each inbound adapter is meant to ship as its own installable extra, so a deployment
+  installs only the transport it needs — not yet true of the current `pyproject.toml`,
+  where `api/`'s dependencies (FastAPI, uvicorn) are unconditional.
 
 ```
 inbound adapter -> services -> strategies -> protocols -> outbound adapters
 ```
 
-Cross-cutting (available to every layer): `models`, `exceptions`, `logging.Logger`
-
-Adapters implement the protocol interfaces and therefore import from `core/protocols/`. The arrow shows the runtime call direction, not the import direction.
-
-No circular imports. No layer calling backwards. No inbound adapter depends on another.
+Cross-cutting (available to every layer): `models`, `exceptions`, `logging.Logger`. The
+arrow above is the runtime call direction, not the import direction — adapters import from
+`core/protocols/` to implement it. No circular imports; no layer calls backwards.
 
 ---
 
 ## Config System
 
-Everything configurable is declared in a single JSON file loaded and validated at startup. Nothing can be changed after the process starts. The configurable surface is:
+Everything configurable is declared in a single JSON file, loaded and validated once at
+startup; nothing changes after the process starts. The configurable surface: the LLM, agent,
+tool, and strategy registries; compaction (summarizer model, budget, keep-window); and
+logging (level, format, destinations).
 
-- **LLM registry** — available providers and their models
-- **Agent registry** — available agents, each with a system prompt, a strategy, a default LLM, and tools
-- **Tool registry** — available tools and their settings
-- **Strategy registry** — available reasoning strategies
-- **Compaction** — the LLM and settings used for compaction, plus the token budget that triggers it
-- **Logging** — level, output format (text/json), and destinations (console, rotating file)
+Registries and factories are the binding layer between that config and runtime:
 
----
-
-## Registries and Factories
-
-Registries and factories are the binding layer between config and runtime.
-
-- **Config declares names.** Each registry section in the config lists what is available by name.
-- **Factories resolve names to instances.** `core/factories/` reads the config and constructs concrete instances at startup. An inbound adapter calls into it — it never does this wiring itself.
-- **Registries answer queries.** At runtime, the core requests an instance by name. If the name is not registered, a startup error is raised immediately — not at invocation time.
-- **Absent names are inactive, not errors.** A name present in code but absent from config is silently unavailable. A name declared in config but not wired by a factory fails fast at startup.
-- **Wiring happens once per process.** The factory builds everything from config at startup; nothing re-reads config afterward.
-- **One exception: components with no config surface.** `InMemorySessionStore` is constructed directly by `api/app.py`'s `create_app()`, not routed through `core/factories/` — there is nothing to resolve from config (no per-instance settings, no allow-list). A future component of the same shape should follow this precedent rather than growing `core/factories/` for a factory with nothing to configure.
+- **Config declares names**; **factories** (`core/factories/`) resolve those names to
+  concrete instances once at startup; **registries** answer runtime lookups by name and
+  raise immediately if a name isn't registered — never at first use.
+- A name present in code but absent from config is silently unavailable. A name in config
+  with no matching implementation fails fast at startup, not at invocation time.
+- A component with no config surface of its own (nothing per-instance to resolve, e.g. the
+  in-memory session store, or logging setup) is constructed directly by its caller instead
+  of routed through `core/factories/`. Follow this precedent rather than growing a factory
+  for a component with nothing to configure.
 
 ---
 
 ## Wire Format
 
 The internal wire format for LLM messages and tool-calling is OpenAI-compatible.
+`ILLM` implementations are contractually required to flatten tool-call/tool-result content
+out of any outbound request that declares no `tools` — some providers reject tool-shaped
+content on a request with no tool schema attached, even when it's just replaying history.
+The leading system message is assembled from the optional root `base_prompt` followed by
+the selected agent's own `system_prompt`, concatenated unconditionally and never overridden
+by client-supplied messages.
 
 ---
 
 ## Conversation Model
 
-The platform supports multiple concurrent conversations (sessions), each identified by a server-generated `session_id` and locked to the agent it was created under — a session cannot be continued through a different agent. Session history (the full message transcript, including tool calls and results) is held in memory only, via `ISessionStore`; it is not persisted and is lost on process restart. Sessions are never trimmed by TTL, but are now bounded by count: four per-session structures across `InMemorySessionStore` (`_sessions`, `_locks`), `CostTracker` (`_session_usage`, cumulative cost/tokens only), and `ContextFootprintTracker` (`_footprints` — a plain token count with no model attached, a gauge rather than a counter, overwritten each turn rather than summed; the single source of truth for a session's current context size, read by both `CompactionService` for its budget check and the usage API's `context_tokens` field; neither `CompactionService` nor `CostTracker` has a state of its own here, and neither depends on the other) are each capped at `AppConfig.max_sessions` via independent LRU eviction — closing the unbounded-growth caveat this store's own section previously documented, leaving durability (not growth) as the remaining known limitation until a durable backend is built. Only `InMemorySessionStore` skips evicting a session currently locked or busy; `CostTracker` and `ContextFootprintTracker` evict purely by LRU recency, with no such check — a session can outlive its recorded context footprint or cumulative-usage entry under sustained eviction pressure, handled by callers treating a missing entry as unknown rather than zero. Concurrent requests against the same `(agent, session_id)` are serialized through `ISessionStore.lock()` wherever a read-modify-write sequence spans more than one store call (e.g. `CompactionService.compact()`'s get-summarize-replace), closing the data-loss race an earlier milestone left open. Concurrent requests against the same `(agent, session_id)` are additionally rejected outright via `ISessionStore.busy()` -- distinct from `lock()`, which serializes a brief store-mutation critical section, `busy()` rejects a second whole operation on the same session rather than letting it silently run against stale context. Token growth within a session is bounded instead: once a session's history crosses its configured budget, the older portion is summarized and replaced, keeping most turns' requests under the model's real context window. A reactive retry backstops the cases the proactive check misses: on an actual context-window-exceeded error, one compact-and-retry attempt is made, using the configured keep-window — never overridden, never forced lower — so the turns it protects are never summarized away by this mechanism under any circumstance; the escalation is triggered only by a real overflow, never by an estimate. Summarization itself is resilient in kind: one retry of a transient summarizer failure, and a chunked map-reduce fallback when the old portion overflows the summarizer's own context window. Once that retry is exhausted the run fails with `CompactionExhaustedError` (`413 compaction_exhausted`), distinct from a plain overflow where compaction was never available to try. See the Config System's Compaction entry. Compaction only ever operates on already-stored history between turns; growth *inside* one in-progress run is bounded separately and optionally, per agent — a cap on a single tool result's length, a cap on how many of one response's tool calls execute, and a cap on the combined tool-result content across the whole run.
+Each conversation is a session, identified by a server-generated `session_id` and locked to
+the agent it was created under. Session history lives only in memory (`ISessionStore`) — not
+persisted, lost on restart; durability, not growth, is the store's known limitation.
+
+- **Bounded by count, not time.** Sessions are never TTL-trimmed; per-session state (stored
+  history, cumulative cost, context-token footprint) is capped via independent LRU eviction.
+  A session can outlive its cost/footprint entry under eviction pressure — callers treat a
+  missing entry as unknown, not zero.
+- **Two concurrency primitives.** A read-modify-write spanning more than one store call is
+  serialized via `lock()`; a whole second operation against the same session is rejected
+  outright via `busy()`, distinct from `lock()`.
+- **Compaction bounds cross-turn growth.** Once stored history crosses a configured token
+  budget, its older portion is summarized and replaced, backed by a reactive retry (on an
+  actual context-window overflow) and a chunked map-reduce fallback (when even the old
+  portion overflows the summarizer). Compaction only touches already-stored history between
+  turns — growth *inside* one in-progress run is bounded separately, below. A strategy's
+  retry after an overflow reruns its whole loop from the start, so an already-executed tool
+  call can run again; safe today only because the one existing tool is read-only.
+- **Cost and context tracking are independent** of each other and of compaction, and neither
+  is exhaustive: cost isn't recorded for compaction's own summarizer calls, nor for a run
+  that fails partway through, so reported cost is a floor, not an exact total.
+- **Per-run growth caps**, optional per agent, bound one in-progress run independent of
+  compaction: a cap on one tool result's length, on tool calls executed per round, and on
+  combined tool-result content across the whole run.
 
 ---
 
 ## Exception Hierarchy
 
-All exceptions are subclasses of `AgentError`. `core/` raises only `AgentError` subclasses. Adapters catch external exceptions and re-raise as the appropriate subclass — raw third-party exceptions must never propagate past the adapter boundary.
+All exceptions are subclasses of `AgentError`; `core/` raises only these, and adapters
+re-raise third-party exceptions as the appropriate subclass at the boundary. `api/`'s request-id
+middleware wraps the whole request in its own exception handler, ahead of Starlette's own
+catch-all — so it, not the app's registered `Exception` handler, is what actually fires for a
+genuinely unhandled exception during a request.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Tests for api/request_context.py -- the request correlation id middleware and filter."""
+"""Tests for api/request_context.py — the request correlation id middleware and filter."""
 
 import logging
 

@@ -115,7 +115,7 @@ def test_message_given_non_tool_role_defaults_tool_call_id_to_none():
     assert message.tool_call_id is None
 
 
-# -- flatten_tool_exchanges_for_no_tools_request ---------------------------------------------
+# — flatten_tool_exchanges_for_no_tools_request ---------------------------------------------
 
 
 def _turn(n: int) -> list[Message]:

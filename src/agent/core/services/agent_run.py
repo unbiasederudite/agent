@@ -31,15 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 def _first_not_none[T](a: T | None, b: T | None) -> T | None:
-    """Return `a`, or `b` if `a` is `None`."""
+    """Return `a`, or `b` if `a` is `None`.
+
+    Args:
+        a: Preferred value.
+        b: Fallback value.
+
+    Returns:
+        T | None: `a` if not `None`, else `b`.
+    """
     return a if a is not None else b
 
 
 class AgentRunService:
-    """Orchestrates a single agent run: resolves config, delegates reasoning to a strategy.
-
-    Always routed through a registered agent's system prompt, defaults, and tools.
-    """
+    """Orchestrates a single agent run: resolves config, delegates reasoning to a strategy."""
 
     def __init__(
         self,
@@ -53,29 +58,18 @@ class AgentRunService:
         cost_tracker: CostTracker | None = None,
         context_tracker: ContextFootprintTracker | None = None,
     ) -> None:
-        """Initialize AgentRunService with its registries.
+        """Initialize with its registries and dependencies.
 
         Args:
             llm_registry: Registry of available LLM implementations.
             agent_registry: Registry of available agent configurations.
             tool_registry: Registry of available tool implementations.
             strategy_registry: Registry of available reasoning strategies.
-            base_prompt: Prepended before every agent's `system_prompt`, merged into
-                the same leading system message. `None` if there's nothing to share.
+            base_prompt: Text prepended before every agent's system prompt.
             session_store: Per-conversation message history storage.
-            compaction_service: Keeps a session's history under a token budget. `None`
-                disables compaction entirely -- no proactive check, no reactive fallback.
-            cost_tracker: Tracks cumulative per-session/per-agent token and cost usage --
-                this service is the sole writer, via one `record()` call after every
-                successful run. `None` constructs a private, disposable instance -- every
-                real caller (`create_app()`) always passes the shared instance explicitly;
-                this default exists only so callers that don't care about usage tracking
-                (most existing tests) aren't forced to construct and pass one just to
-                compile.
-            context_tracker: Tracks each session's current context-token footprint (a
-                separate concern from cumulative usage -- see `ContextFootprintTracker`'s
-                own docstring). Same sole-writer, private-instance-by-default rationale as
-                `cost_tracker`.
+            compaction_service: Keeps a session's history under a token budget.
+            cost_tracker: Cumulative per-session/per-agent token and cost usage.
+            context_tracker: Each session's current context-token footprint.
         """
         self._llm_registry = llm_registry
         self._agent_registry = agent_registry
@@ -104,69 +98,38 @@ class AgentRunService:
     ) -> Run:
         """Complete `message`, routed through the registered agent `agent`.
 
-        `model`/`strategy`, if given, override the agent's configured `model`/`strategy`.
-        `temperature`/`top_p`/`max_tokens` resolve independently as: this call's value,
-        else the agent's configured value, else the LLM's own configured default. The
-        agent's `system_prompt` is unconditionally prepended as the leading system message.
+        Args:
+            message: The user's message to send.
+            agent: Name of the agent to run.
+            model: Model override.
+            strategy: Reasoning strategy override.
+            temperature: Sampling temperature override.
+            top_p: Nucleus sampling override.
+            max_tokens: Max output tokens override.
+            tools: Tool names to offer the LLM, overriding the agent's configured tools.
+            session_id: Session to continue. Omit to start a new one.
 
-        `tools` resolves as a tri-state: omitted or `None` uses the agent's configured
-        `tools` (or none, if it has none); an explicit empty list suppresses tools
-        entirely; a non-empty list is used exactly as given. Each resolved name is looked
-        up against `ToolRegistry` here, before the strategy ever runs, so a strategy only
-        ever sees the exact tool instances it was given -- never the registry itself.
-
-        `session_id`, if given, must belong to `agent` (a session is locked to its
-        creating agent) -- its stored history is threaded in between the system message
-        and this call's new user message. If omitted, the conversation starts empty and a
-        new session is created to hold it. Either way, this call's user message and
-        everything the strategy generates are appended to the session afterward -- the
-        system message itself is never stored, since it's rebuilt fresh from the current
-        `agent_config`/`base_prompt` every call.
-
-        If `agent_config.max_input_chars` is set, a longer `message` is rejected before
-        anything else runs. If a `compaction_service` was given and `session_id` is set,
-        its stored history is checked against the effective model's token budget before
-        this call's messages are built, and compacted first if it's over. If the strategy
-        call itself still overflows the model's context window, one compaction-and-retry
-        attempt is made -- only when a `compaction_service` and an existing `session_id`
-        are both available, using the configured `keep_recent_turns`. `keep_recent_turns`
-        is never overridden: the most recent turns it protects are never summarized away,
-        even as a last resort -- if the retry overflows again, the request fails rather
-        than discarding recent context to try to force a fit.
+        Returns:
+            Run: the completed run.
 
         Raises:
-            AgentNotFoundError: if `agent` is not registered.
-            InputTooLargeError: if `message` exceeds the agent's configured
-                `max_input_chars`.
-            LLMNotFoundError: if the resolved model is not registered.
-            StrategyNotFoundError: if the resolved strategy is not registered.
-            ToolNotFoundError: if a resolved tool name is not registered.
-            ToolNotAllowedError: if a resolved tool name falls outside the agent's
-                configured `allowed_tools` ceiling.
-            ModelNotAllowedError: if the resolved model falls outside the agent's
-                configured `allowed_models` ceiling.
-            StrategyNotAllowedError: if the resolved strategy falls outside the agent's
-                configured `allowed_strategies` ceiling.
-            SessionNotFoundError: if `session_id` is given but no session exists for it
-                under this agent.
-            LLMContextWindowExceededError: if the strategy call overflows the model's
-                context window and compaction was never available to try (no
-                `compaction_service`, or no prior `session_id`).
-            CompactionExhaustedError: if the strategy call overflows and the retry attempt
-                is exhausted -- compaction either failed or left the request still too big.
-                A subclass of `LLMContextWindowExceededError`, so callers that only care
-                about overflow can keep catching that. By this point the session's stored
-                history may already have been compacted by the failed attempt -- this
-                call's own new user message and any turn content were never appended, only
-                the pre-existing stored history was rewritten, so nothing from this specific
-                request is lost, but the session's earlier history is now the (also
-                too-big) compacted result, not what it was before this call.
-            LLMError: if the underlying LLM call fails.
-            SessionBusyError: if `session_id` is given and another operation is already
-                using it -- rejected immediately rather than allowed to run concurrently,
-                which would silently answer without seeing the other operation's exchange.
-            RequestTimeoutError: if the agent has a configured `max_request_seconds` and
-                the strategy call (including any reactive compaction-and-retry) exceeds it.
+            AgentNotFoundError: `agent` is not registered.
+            InputTooLargeError: `message` exceeds the agent's `max_input_chars`.
+            LLMNotFoundError: the resolved model is not registered.
+            StrategyNotFoundError: the resolved strategy is not registered.
+            ToolNotFoundError: a resolved tool name is not registered.
+            ToolNotAllowedError: a resolved tool isn't in the agent's allowed tools.
+            ModelNotAllowedError: the resolved model isn't in the agent's allowed models.
+            StrategyNotAllowedError: the resolved strategy isn't in the agent's allowed
+                strategies.
+            SessionNotFoundError: no session exists for `session_id` under this agent.
+            LLMContextWindowExceededError: the call overflowed the model's context
+                window with no compaction available.
+            CompactionExhaustedError: the call overflowed and the compaction retry was
+                exhausted.
+            LLMError: the underlying LLM call failed.
+            SessionBusyError: another operation is already using `session_id`.
+            RequestTimeoutError: the call exceeded the agent's `max_request_seconds`.
         """
         busy_guard: AbstractAsyncContextManager[None] = (
             self._session_store.busy(agent, session_id) if session_id is not None else nullcontext()
@@ -198,9 +161,39 @@ class AgentRunService:
         tools: list[str] | None,
         session_id: str | None,
     ) -> Run:
-        """The pre-existing body of `run()`, unchanged.
+        """Resolve config, build messages, and execute the strategy call for one run.
 
-        Extracted so `run()` can wrap it in the busy-guard above without duplicating it.
+        Args:
+            message: The user's message to send.
+            agent: Name of the agent to run.
+            model: Model override.
+            strategy: Reasoning strategy override.
+            temperature: Sampling temperature override.
+            top_p: Nucleus sampling override.
+            max_tokens: Max output tokens override.
+            tools: Tool names to offer the LLM, overriding the agent's configured tools.
+            session_id: Session to continue, or `None` for a new one.
+
+        Returns:
+            Run: the completed run.
+
+        Raises:
+            AgentNotFoundError: `agent` is not registered.
+            InputTooLargeError: `message` exceeds the agent's `max_input_chars`.
+            LLMNotFoundError: the resolved model is not registered.
+            StrategyNotFoundError: the resolved strategy is not registered.
+            ToolNotFoundError: a resolved tool name is not registered.
+            ToolNotAllowedError: a resolved tool isn't in the agent's allowed tools.
+            ModelNotAllowedError: the resolved model isn't in the agent's allowed models.
+            StrategyNotAllowedError: the resolved strategy isn't in the agent's allowed
+                strategies.
+            SessionNotFoundError: no session exists for `session_id` under this agent.
+            LLMContextWindowExceededError: the call overflowed the model's context
+                window with no compaction available.
+            CompactionExhaustedError: the call overflowed and the compaction retry was
+                exhausted.
+            LLMError: the underlying LLM call failed.
+            RequestTimeoutError: the call exceeded the agent's `max_request_seconds`.
         """
         start = time.monotonic()
         agent_config = self._agent_registry.get(agent)
@@ -220,15 +213,6 @@ class AgentRunService:
         if self._base_prompt is not None:
             system_content = f"{self._base_prompt}\n\n{agent_config.system_prompt}"
 
-        # Registry-existence is checked before the allow-list ceiling for each of
-        # model/strategy/tools below -- an unregistered name must read as *NotFoundError
-        # (404), never *NotAllowedError (403), regardless of what this agent's allow-list
-        # says. Reversing the order would misclassify "doesn't exist anywhere" as "exists
-        # but isn't permitted for this agent," contradicting each *NotAllowedError's own
-        # docstring. `_llm_registry.get()`/`_strategy_registry.get()` are called again
-        # below (inside `_run_within_deadline`) to actually obtain the instance -- a
-        # second cheap dict lookup, not worth threading the result through the closure
-        # just to avoid it.
         effective_model = model if model is not None else agent_config.model
         self._llm_registry.get(effective_model)
         if (
@@ -340,9 +324,8 @@ class AgentRunService:
 
         try:
             if agent_config.max_request_seconds is not None:
-                # A timeout here can fire after a proactive compaction inside
-                # _run_within_deadline() already committed -- see RequestTimeoutError's
-                # docstring for why that rewrite isn't, and can't be, undone.
+                # A timeout here can fire after a proactive compaction already committed
+                # its rewrite to the session store; that rewrite is not rolled back.
                 turn = await asyncio.wait_for(
                     _run_within_deadline(), timeout=agent_config.max_request_seconds
                 )

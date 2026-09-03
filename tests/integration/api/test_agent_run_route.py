@@ -361,7 +361,7 @@ def test_run_agent_given_rate_limited_does_not_log_in_app_layer(caplog: pytest.L
 
     client.post("/v1/agents/researcher", json={"message": "hi"})
 
-    # Already logged upstream in litellm.py with the same request_id -- app.py adds nothing.
+    # Already logged upstream in litellm.py with the same request_id — app.py adds nothing.
     assert [r for r in caplog.records if r.name == "agent.api.app"] == []
 
 
@@ -382,11 +382,11 @@ def test_run_agent_given_unexpected_exception_logs_error_with_traceback(
 ):
     # A bare RuntimeError matches none of add_agent_run_route's except clauses (they only
     # list AgentError and its subtypes), so it propagates past app.py entirely and is
-    # caught by RequestIdMiddleware's own fallback -- Starlette's ServerErrorMiddleware
+    # caught by RequestIdMiddleware's own fallback — Starlette's ServerErrorMiddleware
     # (which owns handlers for the literal Exception class) sits outside every middleware
     # added via app.add_middleware(), so app.py's own @app.exception_handler(Exception) is
     # structurally unreachable for this exact case (see api/README.md). This test checks
-    # the logger that actually fires, not app.py's -- checking agent.api.app here would
+    # the logger that actually fires, not app.py's — checking agent.api.app here would
     # silently pass by capturing nothing, giving false confidence in dead code.
     caplog.set_level(logging.ERROR, logger="agent.api.request_context")
     client = _client_for(RuntimeError("boom"))

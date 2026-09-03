@@ -1,9 +1,4 @@
-"""Tests for api/logging_setup.py -- JsonFormatter's pure rendering logic.
-
-configure_logging()'s handler-construction/rotation/filesystem behavior lives in
-tests/integration/api/test_logging_setup.py instead -- it does real filesystem I/O and
-mutates the global root logger, which this unit tier doesn't permit.
-"""
+"""Tests for api/logging_setup.py's JsonFormatter and RunContextFilter."""
 
 import json
 import logging

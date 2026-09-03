@@ -61,25 +61,14 @@ from agent.core.session_stores.in_memory import InMemorySessionStore
 
 logger = logging.getLogger(__name__)
 
-# No provider- or capacity-supplied retry timing is available to forward (litellm's own
-# exception classification in adapters/litellm.py doesn't carry one), so this is a fixed,
-# conservative hint per RFC 9110 section 10.2.3 / RFC 6585, not a precise value.
 _RETRY_AFTER_SECONDS = "5"
 
-# Exception types whose HTTPException shape is uniform -- {"message": str(exc), "code": c},
-# no custom message or headers -- mapped in one place instead of one `except` clause each.
-# None of these subclass each other (or anything mapped separately in run_agent below), so
-# catching the whole tuple in a single `except` and dispatching on `type(exc)` is safe: the
-# caught instance's exact type is always one of these keys, never a broader/narrower one.
 _UNIFORM_ERROR_MAP: dict[type[Exception], tuple[int, str]] = {
     AgentNotFoundError: (404, "agent_not_found"),
     LLMNotFoundError: (404, "model_not_found"),
     StrategyNotFoundError: (404, "strategy_not_found"),
     SessionNotFoundError: (404, "session_not_found"),
     ToolNotFoundError: (404, "tool_not_found"),
-    # 413, not 400 -- RFC 9110 section 15.5.14: "the request content is larger than the
-    # server is willing or able to process," which is exactly this condition, not a
-    # generic malformed-request 400.
     InputTooLargeError: (413, "input_too_large"),
     SessionBusyError: (409, "session_busy"),
     ToolNotAllowedError: (403, "tool_not_allowed"),
@@ -89,16 +78,25 @@ _UNIFORM_ERROR_MAP: dict[type[Exception], tuple[int, str]] = {
 
 
 def add_exception_handlers(app: FastAPI) -> None:
-    """Register handlers for request-validation failures, every HTTPException in the app.
+    """Register the validation-error, HTTPException, and 500 catch-all handlers on `app`.
 
-    Covers both framework-level and deliberately-raised HTTPExceptions, plus the 500
-    catch-all on `app`.
+    Args:
+        app: FastAPI app to register the route on.
     """
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
         _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        """Map the first validation error to a 400 with a normalized `message`/`param`.
+
+        Args:
+            _request: The failed request (unused).
+            exc: The validation error.
+
+        Returns:
+            JSONResponse: 400 with the normalized error body.
+        """
         first = exc.errors()[0]
         loc = [str(p) for p in first["loc"] if p != "body"]
         message = first["msg"].removeprefix("Value error, ")
@@ -110,19 +108,14 @@ def add_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        """Handle every `HTTPException` funneled through this app.
+        """Normalize an `HTTPException` into a JSON response, logging 404s and 405s.
 
-        Both Starlette's own framework-level ones (unmatched route / wrong method, a plain
-        string `detail`) and every deliberately-raised one from `add_agent_run_route` (a
-        `{"message": ..., "code": ...}`-shaped `detail`, `code` omitted when the status is
-        unambiguous on its own -- see the root `README.md`'s Errors table). The plain-string
-        case is normalized into the same `{"message": ...}` shape so callers can always read
-        `detail["message"]` regardless of which of the two produced this response. Mirrors
-        FastAPI's own default `StarletteHTTPException` handling otherwise -- same
-        status/headers -- and additionally logs INFO for 404/405, which have no log line
-        anywhere upstream -- 400 (`InputTooLargeError`) already has one in `agent_run.py`,
-        and 429/502/503/504 already have their own, more detailed, log line one layer down
-        (`litellm.py`/`agent_run.py`), so logging any of those again here would double-log.
+        Args:
+            request: The failed request.
+            exc: The raised HTTPException.
+
+        Returns:
+            JSONResponse: response mirroring `exc`'s status code, detail, and headers.
         """
         if exc.status_code in (404, 405):
             logger.info("%d response: %s %s", exc.status_code, request.method, request.url.path)
@@ -135,6 +128,15 @@ def add_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def handle_unexpected_exception(_request: Request, exc: Exception) -> JSONResponse:
+        """Map any otherwise-unhandled exception to a 500 with the current request id.
+
+        Args:
+            _request: The failed request (unused).
+            exc: The unhandled exception.
+
+        Returns:
+            JSONResponse: 500 with a fixed message and the current request id.
+        """
         logger.error("unhandled exception: %s", exc, exc_info=True)
         return JSONResponse(
             status_code=500,
@@ -145,7 +147,12 @@ def add_exception_handlers(app: FastAPI) -> None:
 
 
 def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> None:
-    """Register POST /v1/agents/{agent_name} on `app`, backed by `agent_run_service`."""
+    """Register POST /v1/agents/{agent_name} on `app`, backed by `agent_run_service`.
+
+    Args:
+        app: FastAPI app to register the route on.
+        agent_run_service: Service backing the route.
+    """
 
     @app.post("/v1/agents/{agent_name}")
     async def run_agent(agent_name: str, request: AgentRunRequest) -> AgentRunResponse:
@@ -183,12 +190,6 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
                 },
             ) from exc
         except CompactionExhaustedError as exc:
-            # Must stay above the generic overflow handler below: this subclasses it, and
-            # `except` clauses are checked in order -- reversed, this one is unreachable.
-            # 413, not 502 -- RFC 9110 section 15.6.3 defines 502 as an *invalid* response
-            # from an upstream server; the provider's rejection here is valid and
-            # well-formed, it's just saying the content is too large, the same 413
-            # Content Too Large condition as InputTooLargeError above.
             raise HTTPException(
                 status_code=413,
                 detail={
@@ -208,8 +209,6 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
                 },
             ) from exc
         except LLMOverloadedError as exc:
-            # Must stay above LLMError below: this subclasses it, same reasoning as
-            # CompactionExhaustedError's own comment above.
             raise HTTPException(
                 status_code=503,
                 detail={"message": "This model is at capacity. Please try again shortly."},
@@ -251,7 +250,15 @@ def add_registry_routes(
     llm_registry: LLMRegistry,
     strategy_registry: StrategyRegistry,
 ) -> None:
-    """Register GET /v1/agents, GET /v1/tools, GET /v1/models, GET /v1/strategies on `app`."""
+    """Register GET /v1/agents, GET /v1/tools, GET /v1/models, GET /v1/strategies on `app`.
+
+    Args:
+        app: FastAPI app to register the routes on.
+        agent_registry: Registry backing GET /v1/agents.
+        tool_registry: Registry backing GET /v1/tools.
+        llm_registry: Registry backing GET /v1/models.
+        strategy_registry: Registry backing GET /v1/strategies.
+    """
 
     @app.get("/v1/agents")
     async def list_agents() -> list[AgentSummary]:
@@ -294,13 +301,10 @@ def add_registry_routes(
 
 
 def add_health_route(app: FastAPI) -> None:
-    """Register GET /health -- a liveness check only.
+    """Register a dependency-free `GET /health` liveness route on `app`.
 
-    Deliberately no dependency check (no pinging the configured LLM providers): a provider
-    being briefly down doesn't mean this service itself is unhealthy, and a health check
-    that calls out to a paid external API on every poll is a real cost for no diagnostic
-    benefit. Deliberately not logged, not even at DEBUG -- infrastructure typically polls
-    this every few seconds, and logging each poll would dominate log volume for nothing.
+    Args:
+        app: FastAPI app to register the route on.
     """
 
     @app.get("/health")
@@ -309,14 +313,11 @@ def add_health_route(app: FastAPI) -> None:
 
 
 def add_session_routes(app: FastAPI, session_service: SessionService) -> None:
-    """Register GET/DELETE /v1/agents/{agent_name}/sessions/{session_id} and its /usage.
+    """Register GET/DELETE /v1/agents/{agent_name}/sessions/{session_id} and its /usage on `app`.
 
-    An unknown `agent_name` reads as "session not found" for all three routes, the same as
-    `ISessionStore`'s own dict-key semantics -- no separate agent-registry lookup is
-    needed here. All three routes are pure translation -- the busy-guard-plus-delete-
-    plus-forget sequencing and the cumulative-usage/context-footprint lookup both live in
-    `SessionService` (`core/services/`), not here, so a future `cli/` inbound adapter
-    reuses them rather than having to rediscover them.
+    Args:
+        app: FastAPI app to register the routes on.
+        session_service: Service backing the routes.
     """
 
     @app.get("/v1/agents/{agent_name}/sessions/{session_id}")
@@ -360,7 +361,13 @@ def add_session_routes(app: FastAPI, session_service: SessionService) -> None:
 def add_usage_routes(
     app: FastAPI, agent_registry: AgentRegistry, cost_tracker: CostTracker
 ) -> None:
-    """Register GET /v1/agents/{agent_name}/usage on `app`."""
+    """Register GET /v1/agents/{agent_name}/usage on `app`.
+
+    Args:
+        app: FastAPI app to register the route on.
+        agent_registry: Registry used to validate the agent name exists.
+        cost_tracker: Tracker backing the route.
+    """
 
     @app.get("/v1/agents/{agent_name}/usage")
     async def get_agent_usage(agent_name: str) -> AgentUsageResponse:
@@ -374,12 +381,16 @@ def add_usage_routes(
 
 
 def create_app(config_path: Path) -> FastAPI:
-    """Build the FastAPI app, wired from the AppConfig JSON at `config_path`.
+    """Build the FastAPI app, wired from the startup configuration JSON at `config_path`.
+
+    Args:
+        config_path: Path to the startup configuration JSON file.
+
+    Returns:
+        FastAPI: the built app.
 
     Raises:
-        ConfigError: if `config_path` is missing, not valid JSON, or fails `AppConfig`
-            validation -- reading/parsing the file is this function's own job, not
-            `build_registries()`'s, since `core/` (per its own README) owns no I/O.
+        ConfigError: if `config_path` is missing, not valid JSON, or fails validation.
     """
     try:
         config = AppConfig.model_validate_json(config_path.read_bytes())

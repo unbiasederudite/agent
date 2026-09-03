@@ -1,4 +1,4 @@
-"""Tests for ReactStrategy -- the ReAct tool-calling loop."""
+"""Tests for ReactStrategy — the ReAct tool-calling loop."""
 
 import asyncio
 import json
@@ -309,12 +309,12 @@ async def test_run_given_max_iterations_exhausted_forces_one_final_call_without_
 
 async def test_run_given_max_iterations_exhausted_final_call_passes_messages_through_unmodified():
     # The forced final call declares no tools, so what actually reaches the provider may not
-    # carry toolUse/toolResult blocks -- but folding them out is the `ILLM` implementation's
+    # carry toolUse/toolResult blocks — but folding them out is the `ILLM` implementation's
     # contractual job, proven against the real outbound payload in
     # `tests/integration/adapters/test_litellm.py`. This strategy doesn't pre-flatten anything
     # itself, and a fake LLM here could never prove the provider-safety property anyway. It does
     # append one scoped instruction message to this one outbound request (see `ReactStrategy`'s
-    # own docstring note on why) -- everything before that is untouched.
+    # own docstring note on why) — everything before that is untouched.
     tools: dict[str, ITool] = {"echo": _EchoTool()}
     always_calls_tool = _tool_call_completion([_call("call_1", "echo", '{"value": "x"}')])
     llm = _FakeLLM([always_calls_tool, always_calls_tool, _final_completion("gave up")])
@@ -341,7 +341,7 @@ async def test_run_given_max_iterations_exhausted_final_call_passes_messages_thr
 
 async def test_run_given_max_iterations_exhausted_turn_messages_keeps_the_real_tool_exchange():
     # What gets returned (and stored as session history) keeps the genuine tool-call/tool-result
-    # messages -- the strategy's own bookkeeping is never rewritten for any one call's needs.
+    # messages — the strategy's own bookkeeping is never rewritten for any one call's needs.
     tools: dict[str, ITool] = {"echo": _EchoTool()}
     always_calls_tool = _tool_call_completion([_call("call_1", "echo", '{"value": "x"}')])
     llm = _FakeLLM([always_calls_tool, always_calls_tool, _final_completion("gave up")])
@@ -430,11 +430,11 @@ async def test_run_given_no_tools_never_offers_tools_to_llm():
 
 async def test_run_given_no_tools_and_tool_history_still_returns_a_sensible_turn():
     # The previously-unhandled third gap: an empty `tools` dict makes `tool_schemas` None, so
-    # even the MAIN LOOP call declares no tools -- on a session whose history already holds a
+    # even the MAIN LOOP call declares no tools — on a session whose history already holds a
     # real tool exchange from an earlier turn (e.g. AgentRunService's documented `tools=[]`
     # override). This is the unit half of the fix: the strategy hands that history straight to
     # the LLM and returns a normal Turn, no crash and no special-casing. A fake LLM cannot
-    # prove the actual provider-safety property -- that the outbound request is flattened is
+    # prove the actual provider-safety property — that the outbound request is flattened is
     # proven in `tests/integration/adapters/test_litellm.py` against the real adapter.
     history = [
         Message(role="user", content="what time is it?"),
@@ -671,8 +671,8 @@ async def test_run_given_max_iterations_exhausted_final_total_tokens_is_the_forc
     assert turn.final_total_tokens == 54
 
 
-_SKIP_MARKER = "Error: skipped -- this round requested more than the 2 tool calls allowed at once"
-_OMITTED_MARKER = "Error: tool result omitted -- aggregate tool-output budget exhausted"
+_SKIP_MARKER = "Error: skipped — this round requested more than the 2 tool calls allowed at once"
+_OMITTED_MARKER = "Error: tool result omitted — aggregate tool-output budget exhausted"
 
 
 def _three_echo_calls() -> list[ToolCall]:
@@ -833,7 +833,7 @@ async def test_run_given_a_skipped_call_its_marker_is_still_subject_to_the_aggre
         max_tool_results_total_chars=10,
     )
 
-    # The skipped call's own marker is a result like any other -- it never bypasses the budget.
+    # The skipped call's own marker is a result like any other — it never bypasses the budget.
     assert llm.calls[2]["messages"][-1].content == _OMITTED_MARKER
 
 
@@ -1106,7 +1106,7 @@ async def test_run_given_valid_arguments_executes_normally():
 
 
 async def test_run_given_valid_arguments_execute_receives_the_validated_value():
-    # Proves execute() gets validated.model_dump(), not the raw parsed JSON -- a default
+    # Proves execute() gets validated.model_dump(), not the raw parsed JSON — a default
     # the caller never supplied must still reach execute() as an explicit kwarg.
     class _DefaultingParams(BaseModel):
         model_config = ConfigDict(extra="forbid")

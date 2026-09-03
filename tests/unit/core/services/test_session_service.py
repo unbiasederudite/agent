@@ -127,13 +127,7 @@ async def test_get_usage_given_unknown_session_raises_session_not_found_error():
 
 
 async def test_get_usage_given_session_with_no_recorded_usage_returns_zero_usage():
-    """Return zero usage for a session with no recorded usage.
-
-    Defensive case, reachable in real wiring when `max_sessions` is configured:
-    `CostTracker`'s LRU eviction doesn't skip a busy/locked session the way
-    `InMemorySessionStore`'s does, so a session can survive in the store while its
-    `CostTracker` entry gets evicted -- this must not 500 when it happens.
-    """
+    """Reachable when `max_sessions` LRU-evicts a `CostTracker` entry but not the session itself."""
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
     service = SessionService(store)
@@ -145,7 +139,7 @@ async def test_get_usage_given_session_with_no_recorded_usage_returns_zero_usage
 
 
 async def test_get_usage_given_usage_recorded_but_no_context_footprint_defaults_footprint_only():
-    """`get_usage()` composes two independent reads -- one missing must not blank the other."""
+    """`get_usage()` composes two independent reads — one missing must not blank the other."""
     store = InMemorySessionStore()
     session_id = await store.create("researcher")
     cost_tracker = CostTracker()

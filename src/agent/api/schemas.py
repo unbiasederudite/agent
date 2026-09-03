@@ -16,10 +16,7 @@ class AgentRunRequest(BaseModel):
     message: str = Field(description="The user's message to send to the agent.")
     model: str | None = Field(
         default=None,
-        description=(
-            "litellm-format provider/model string overriding the agent's configured `model`; "
-            "be declared in the server's config."
-        ),
+        description="litellm-format provider/model string overriding the agent's configured model.",
     )
     strategy: str | None = Field(
         default=None,
@@ -28,49 +25,31 @@ class AgentRunRequest(BaseModel):
     temperature: float | None = Field(
         default=None,
         ge=0,
-        description=(
-            "Overrides the agent's/LLM's configured default, if set. Only the lower bound "
-            "is enforced here -- the upper bound is provider-specific (2 for OpenAI, 1 for "
-            "Anthropic), so a too-high value is left for the provider itself to reject "
-            "rather than guessed at here and potentially validated wrong for the agent's "
-            "actual configured model."
-        ),
+        description="Sampling temperature override.",
     )
     top_p: float | None = Field(
         default=None,
         ge=0,
         le=1,
-        description="Overrides the agent's/LLM's configured default, if set.",
+        description="Nucleus sampling override.",
     )
     max_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Overrides the agent's/LLM's configured default, if set.",
+        description="Max output tokens override.",
     )
     tools: list[str] | None = Field(
         default=None,
-        description=(
-            "Registered tool names to offer the LLM. Omitted/null uses the agent's "
-            "configured tools (or none); an empty list suppresses tools even if the agent "
-            "has some; a non-empty list is used as-is, ignoring the agent's own."
-        ),
+        description="Tool names to offer the LLM, overriding the agent's configured tools.",
     )
     session_id: str | None = Field(
         default=None,
-        description=(
-            "Continues an existing conversation with this agent. Omit to start a new one "
-            "-- the response's session_id is then a freshly created one to pass on the "
-            "next call. A session_id created under a different agent is treated as unknown."
-        ),
+        description="Session id to continue an existing conversation.",
     )
 
 
 class AgentRunResponse(BaseModel):
-    """Response body for POST /v1/agents/{agent_name}.
-
-    Its own model rather than reusing `core.models.run.Run` directly, keeping the
-    API-facing DTO independent of the internal domain model.
-    """
+    """Response body for POST /v1/agents/{agent_name}."""
 
     model: str = Field(
         description="The litellm-format provider/model string that ran this request."
@@ -78,21 +57,14 @@ class AgentRunResponse(BaseModel):
     message: Message = Field(description="The generated reply message.")
     usage: Usage = Field(description="Token usage for this run.")
     finish_reason: str = Field(description="Why generation stopped.")
-    session_id: str = Field(
-        description=(
-            "The session this response belongs to -- pass it back to continue the conversation."
-        )
-    )
+    session_id: str = Field(description="Session id this response belongs to.")
 
 
 class SessionHistoryResponse(BaseModel):
     """Response body for GET /v1/agents/{agent_name}/sessions/{session_id}."""
 
     session_id: str = Field(description="The session this history belongs to.")
-    messages: list[Message] = Field(
-        description="Every stored message, in order, unfiltered -- every role, including "
-        "tool calls and tool results exactly as stored."
-    )
+    messages: list[Message] = Field(description="Every stored message, in order.")
 
 
 class SessionUsageResponse(BaseModel):
@@ -111,22 +83,15 @@ class AgentUsageResponse(BaseModel):
     """Response body for GET /v1/agents/{agent_name}/usage."""
 
     agent: str = Field(description="The agent this usage belongs to.")
-    cumulative: Usage = Field(
-        description=(
-            "Token and cost totals summed across every run against this agent, across "
-            "all its sessions. All-zero if this agent has never been run."
-        )
-    )
+    cumulative: Usage = Field(description="Token and cost totals across all this agent's sessions.")
 
 
 class AgentSummary(BaseModel):
     """One entry in the GET /v1/agents listing."""
 
     name: str = Field(description="The agent's lookup key.")
-    model: str = Field(description="The LLM used when a request doesn't override `model`.")
-    strategy: str = Field(
-        description="The reasoning strategy used when a request doesn't override `strategy`."
-    )
+    model: str = Field(description="The agent's default LLM.")
+    strategy: str = Field(description="The agent's default reasoning strategy.")
     tools: list[str] = Field(description="Tool names available to this agent by default.")
 
 

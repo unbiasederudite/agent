@@ -1,4 +1,4 @@
-"""LiteLLM adapter implementation for ILLM protocol."""
+"""LLM adapter backed by litellm, giving access to any provider litellm supports."""
 
 import asyncio
 import logging
@@ -28,21 +28,40 @@ logger = logging.getLogger(__name__)
 
 
 def _first_not_none[T](a: T | None, b: T | None) -> T | None:
-    """Return `a`, or `b` if `a` is `None`."""
+    """Return `a`, or `b` if `a` is `None`.
+
+    Args:
+        a: Preferred value.
+        b: Fallback value.
+
+    Returns:
+        T | None: `a` if not `None`, else `b`.
+    """
     return a if a is not None else b
 
 
 def _is_retriable(status_code: int | None) -> bool:
-    """No HTTP response at all (a raw connection error) or a 5xx is worth retrying.
+    """Return whether a failure (by HTTP status) is worth retrying: no response, or a 5xx.
 
-    Any other 4xx (bad request, auth, permission, not found, unprocessable) is a permanent,
-    client-side mistake that would fail identically on a second attempt.
+    Args:
+        status_code: The failure's HTTP status code, if any.
+
+    Returns:
+        bool: whether the failure is worth retrying.
     """
     return status_code is None or status_code >= 500
 
 
 def _classify(exc: Exception, status_code: int | None) -> LLMError:
-    """Map a caught provider exception to its typed equivalent, by status code."""
+    """Map a caught provider exception to its typed equivalent, by status code.
+
+    Args:
+        exc: The caught exception.
+        status_code: The failure's HTTP status code, if any.
+
+    Returns:
+        LLMError: the typed equivalent.
+    """
     if status_code == 429:
         return LLMRateLimitedError(str(exc))
     if status_code == 408:  # litellm's own marker for a timeout, not real HTTP 408
@@ -51,7 +70,7 @@ def _classify(exc: Exception, status_code: int | None) -> LLMError:
 
 
 class LiteLLMAdapter:
-    """ILLM implementation backed by litellm, supporting any litellm provider."""
+    """Turns messages into a completion via litellm, supporting any litellm provider."""
 
     def __init__(
         self,
@@ -70,24 +89,17 @@ class LiteLLMAdapter:
         """Initialize adapter with a model identifier and its configured sampling defaults.
 
         Args:
-            model: The model string (e.g., 'openai/gpt-4o') to use with litellm.
-            temperature: Default sampling temperature, used when a call doesn't override it.
-            top_p: Default nucleus sampling value, used when a call doesn't override it.
-            max_tokens: Default max output tokens, used when a call doesn't override it.
-            context_window: Overrides litellm's own context-window lookup for this model
-                in `max_input_tokens()`; used when litellm's static data doesn't recognize
-                this model. `None` leaves the litellm lookup in place.
-            num_retries: Retries for retriable failures before giving up. This adapter runs
-                its own retry loop -- litellm's own `num_retries` parameter is never used,
-                since it would retry permanent errors (bad auth, bad request) as eagerly as
-                transient ones.
-            timeout: Per-attempt timeout in seconds, forwarded to litellm. `None` leaves
-                litellm's own default in place.
+            model: The litellm model string (e.g., 'openai/gpt-4o').
+            temperature: Default sampling temperature.
+            top_p: Default nucleus sampling value.
+            max_tokens: Default max output tokens.
+            context_window: Override for the model's context-window size.
+            num_retries: Retry count for retriable failures.
+            timeout: Per-attempt timeout in seconds.
             retry_base_delay: Delay before the first retry, in seconds.
             retry_max_delay: Cap on delay between retries, in seconds.
-            retry_multiplier: Backoff multiplier applied to the delay after each retry.
+            retry_multiplier: Backoff multiplier for retry delay.
             max_concurrent_requests: Cap on concurrent in-flight calls to this model.
-                `None` means unlimited.
         """
         self._model = model
         self._temperature = temperature
@@ -104,11 +116,13 @@ class LiteLLMAdapter:
 
     @classmethod
     def from_config(cls, config: LLMConfig) -> "LiteLLMAdapter":
-        """Build an adapter from a startup `LLMConfig`, one field-for-field mapping.
+        """Build an adapter from a model's configuration, mapping its fields onto `__init__`.
 
-        The only place `LLMConfig`'s fields are unpacked into `__init__`'s matching
-        parameters -- callers building an adapter from config (`core/factories/app.py`)
-        use this instead of repeating that unpacking themselves.
+        Args:
+            config: The model's startup configuration.
+
+        Returns:
+            LiteLLMAdapter: the built adapter.
         """
         return cls(
             config.model,
@@ -134,37 +148,21 @@ class LiteLLMAdapter:
     ) -> Completion:
         """Send messages to litellm and map the result to a Completion.
 
-        `temperature`/`top_p`/`max_tokens` of `None` fall back to this adapter's
-        constructed default; if that is also `None`, the param is omitted from the
-        litellm call and the provider's own default applies. `tools`, if non-empty, is
-        forwarded to litellm as-is; any `tool_calls` litellm returns are mapped onto the
-        returned message and never invoked here.
+        Args:
+            messages: Conversation history to send.
+            temperature: Temperature override for this call.
+            top_p: Top-p override for this call.
+            max_tokens: Max-tokens override for this call.
+            tools: OpenAI-format function schemas to offer the model.
 
-        Whenever `tools` is empty (`None` or `[]`), `messages` is first folded through
-        `flatten_tool_exchanges_for_no_tools_request`: some providers -- Bedrock's Converse
-        API, confirmed -- reject a request carrying `role="tool"` messages or `tool_calls`
-        when it declares no `tools`, even when those merely replay an earlier exchange. This
-        is unconditional and independent of why the caller has no tools this time, so callers
-        may always pass real, un-pre-processed history. It is a no-op for a list that holds no
-        tool-shaped content.
-
-        Retries retriable failures (rate limits, timeouts, 5xx, connection errors) up to
-        `num_retries` times with exponential backoff before raising; a permanent failure
-        (4xx other than 429/408) raises immediately, never retried.
+        Returns:
+            Completion: the mapped model response.
 
         Raises:
-            LLMOverloadedError: if `max_concurrent_requests` is set and already reached --
-                checked before any provider call, never retried.
-            LLMRateLimitedError: if litellm reports the provider rate-limited the request.
-            LLMTimeoutError: if litellm reports the request timed out.
-            LLMError: if the underlying litellm call fails for any other reason, or
-                returns a message with no `tool_calls` and empty/`None` `content` --
-                an empty-string reply would otherwise be stored verbatim and later
-                rejected by Anthropic/Bedrock, which reject empty text blocks. An
-                empty-string `content` is normalized to `None` even when `tool_calls`
-                is present (so it isn't raised on) -- otherwise the empty string
-                survives `model_dump(exclude_none=True)` and can trip the same
-                empty-text-block rejection on a later call that replays this message.
+            LLMOverloadedError: if the concurrency cap is already reached.
+            LLMRateLimitedError: if the provider rate-limited the request.
+            LLMTimeoutError: if the request timed out.
+            LLMError: if the call fails, or the response has neither content nor tool_calls.
         """
         if self._max_concurrent is not None and self._in_flight >= self._max_concurrent:
             logger.warning(
@@ -197,9 +195,22 @@ class LiteLLMAdapter:
         max_tokens: int | None,
         tools: list[dict[str, Any]] | None,
     ) -> Completion:
-        """The retry loop from Task 4 -- unchanged, just extracted so `complete()` can wrap it.
+        """Send messages to litellm with retries, and map the result to a Completion.
 
-        This lets `complete()` add the concurrency check above without duplicating this body.
+        Args:
+            messages: Conversation history to send.
+            temperature: Temperature override for this call.
+            top_p: Top-p override for this call.
+            max_tokens: Max-tokens override for this call.
+            tools: OpenAI-format function schemas to offer the model.
+
+        Returns:
+            Completion: the mapped model response.
+
+        Raises:
+            LLMRateLimitedError: if the provider rate-limited the request.
+            LLMTimeoutError: if the request timed out.
+            LLMError: if the call fails, or the response has neither content nor tool_calls.
         """
         resolved_temperature = _first_not_none(temperature, self._temperature)
         resolved_top_p = _first_not_none(top_p, self._top_p)
@@ -269,13 +280,10 @@ class LiteLLMAdapter:
                 await asyncio.sleep(delay)
                 continue
 
-            # Parsing/constructing the result from a *successful* network call -- kept
-            # outside the except block above so a shape problem here (empty `choices`,
-            # a missing field) is classified as LLMError directly, once, rather than
-            # falling into the retry-eligible except above: it has no .status_code, so
-            # _is_retriable(None) would otherwise treat it as a transient failure and
-            # silently retry a deterministically-malformed response num_retries times
-            # before finally reporting it -- same wrong outcome, wasted retry budget.
+            # Parsing/constructing the result from a *successful* call is kept outside the
+            # except block above: a response-shape problem here has no .status_code, so
+            # treating it as retriable would silently retry a deterministically-malformed
+            # response num_retries times before reporting it, instead of failing once.
             try:
                 choice = response.choices[0]
                 raw_tool_calls = getattr(choice.message, "tool_calls", None)
@@ -296,9 +304,6 @@ class LiteLLMAdapter:
                 if content is None and tool_calls is None:
                     raise LLMError("litellm returned a message with neither content nor tool_calls")
                 try:
-                    # Rounded to clean up binary-float noise (e.g. 6.5999999999999995e-06
-                    # instead of 6.6e-06) -- 10dp is far below any realistic per-call cost
-                    # while still well above where that noise appears.
                     cost_usd = round(litellm.completion_cost(completion_response=response), 10)
                 except Exception:
                     cost_usd = None
@@ -329,18 +334,16 @@ class LiteLLMAdapter:
                     extra={"exception_type": type(shape_error).__name__},
                 )
                 raise shape_error from exc
-        raise AssertionError("unreachable -- the loop above always returns or raises")
+        raise AssertionError("unreachable — the loop above always returns or raises")
 
     def max_input_tokens(self) -> int:
         """Return this model's maximum input token count.
 
-        Not async -- a local model-data lookup, no network call. If this adapter was
-        constructed with `context_window`, that value is returned directly and
-        unconditionally, taking precedence over the litellm lookup even for a model
-        litellm would otherwise recognize correctly.
+        Returns:
+            int: the model's maximum input token count.
 
         Raises:
-            LLMError: if litellm has no known limit for this model.
+            LLMError: if no known limit is found for this model.
         """
         if self._context_window is not None:
             return self._context_window

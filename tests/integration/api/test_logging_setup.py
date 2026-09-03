@@ -1,10 +1,4 @@
-"""Tests for api/logging_setup.py -- configure_logging()'s handler construction, rotation.
-
-Real filesystem I/O (tmp_path, real logging.FileHandler/RotatingFileHandler construction)
-and global root-logger mutation, so this lives in the integration tier, not unit.
-JsonFormatter's own pure rendering logic is covered separately in
-tests/unit/api/test_logging_setup.py.
-"""
+"""Tests for api/logging_setup.py's configure_logging(): handler construction and rotation."""
 
 import logging
 import logging.handlers
@@ -123,7 +117,7 @@ def test_configure_logging_given_multiple_filters_attaches_all_to_every_handler(
 
 
 def test_configure_logging_given_text_format_and_no_filters_does_not_raise():
-    # No RequestIdFilter/RunContextFilter attached -- record.request_id/agent/session_id
+    # No RequestIdFilter/RunContextFilter attached — record.request_id/agent/session_id
     # are never set. The text format string references all three; formatter `defaults`
     # must cover them or this crashes with KeyError the first time anything logs.
     configure_logging(LoggingConfig(format="text"))

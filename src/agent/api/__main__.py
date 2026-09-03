@@ -11,7 +11,11 @@ from agent.core.exceptions import ConfigError
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse CLI arguments, build the app, and start the uvicorn server."""
+    """Parse CLI arguments, build the app, and start the uvicorn server.
+
+    Args:
+        argv: Arguments to parse. `None` uses `sys.argv`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m agent.api", description="Run the agent-core agent API."
     )

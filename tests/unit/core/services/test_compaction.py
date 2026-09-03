@@ -29,7 +29,7 @@ class _FakeLLM:
     """A stand-in ILLM: fixed max_input_tokens, queued complete() outcomes.
 
     `completion` takes either one outcome (used for every call) or a list returned in
-    order, one per `complete()` call, with the last one repeating -- same convention as
+    order, one per `complete()` call, with the last one repeating — same convention as
     `_FakeStrategy` in `test_agent_run.py`. The list form is what exercises the
     summarizer's retry-once and its chunked-summarization fallback, both of which turn on
     *consecutive* calls differing.
@@ -122,7 +122,7 @@ def _compacted(recent: list[Message], content: str = "summary") -> list[Message]
     """The history `compact` stores: a synthetic summary turn prepended before `recent`.
 
     Always the same two-message shape (`role="user"` summary, `role="assistant"`
-    acknowledgment) regardless of how many turns `recent` holds, including none -- this
+    acknowledgment) regardless of how many turns `recent` holds, including none — this
     keeps the stored history starting on `role="user"` (the shape Anthropic requires) and
     never produces two consecutive same-role messages, since the acknowledgment always sits
     between the summary and whatever comes next.
@@ -140,9 +140,9 @@ def _assert_anthropic_safe_shape(messages: list[Message]) -> None:
 
     Checked independently of any single test's own hand-built expected value (e.g.
     `_compacted()`), so a shared wrong assumption in both the implementation and a test's
-    fixture can't hide a real violation -- this is exactly how the assistant-first-message
+    fixture can't hide a real violation — this is exactly how the assistant-first-message
     and consecutive-user-message bugs slipped through earlier reviews. Tool exchanges are not
-    checked here: both stored history and a summarizer request may legitimately carry them --
+    checked here: both stored history and a summarizer request may legitimately carry them —
     folding them out of a no-tools request is the `ILLM` implementation's job, covered in
     `tests/integration/adapters/test_litellm.py`. Empty: trivially safe.
     """
@@ -163,7 +163,7 @@ async def _seeded_store(turns: list[list[Message]]) -> tuple[InMemorySessionStor
     return store, session_id
 
 
-# -- _split_at_turn_boundary ----------------------------------------------------------------
+# — _split_at_turn_boundary ----------------------------------------------------------------
 
 
 def test_split_given_empty_history_returns_zero():
@@ -218,7 +218,7 @@ def test_split_never_separates_a_tool_call_from_its_result():
     assert tool_result in kept
 
 
-# -- _chunk_by_turns ------------------------------------------------------------------------
+# — _chunk_by_turns ------------------------------------------------------------------------
 
 
 def test_chunk_by_turns_given_empty_messages_returns_no_chunks():
@@ -238,7 +238,7 @@ def test_chunk_by_turns_given_a_partial_last_group_keeps_the_remainder():
 
 
 def test_chunk_by_turns_given_a_single_turn_returns_one_chunk():
-    # `_summarize_chunked` refuses to chunk further when this returns one chunk -- a single
+    # `_summarize_chunked` refuses to chunk further when this returns one chunk — a single
     # turn that alone overflows the summarizer isn't recoverable by splitting it.
     assert _chunk_by_turns(_turn(1), 4) == [_turn(1)]
 
@@ -249,7 +249,7 @@ def test_chunk_by_turns_never_separates_a_tool_call_from_its_result():
     assert chunks == [_tool_turn(1), _tool_turn(2)]
 
 
-# -- context_tracker / maybe_compact ---------------------------------------------------------
+# — context_tracker / maybe_compact ---------------------------------------------------------
 
 
 async def test_maybe_compact_given_no_recorded_usage_is_a_noop():
@@ -339,7 +339,7 @@ async def test_maybe_compact_given_unknown_context_window_is_a_noop():
     assert await store.get("researcher", session_id) == _turn(1) + _turn(2) + _turn(3)
 
 
-# -- compact -----------------------------------------------------------------------------
+# — compact -----------------------------------------------------------------------------
 
 
 async def test_compact_given_nothing_older_than_keep_window_returns_false():
@@ -618,7 +618,7 @@ async def test_compact_clears_stale_usage_estimate():
     compacted = await service.compact("researcher", session_id)
     assert compacted is True
 
-    # A successful compact() resets the shared context_tracker's footprint directly -- the old
+    # A successful compact() resets the shared context_tracker's footprint directly — the old
     # footprint no longer describes the now-shrunk history.
     assert tracker.get("researcher", session_id) is None
 
@@ -635,7 +635,7 @@ _RESUMMARY = "the earlier conversation was itself already summarized; little det
 
 async def test_compact_given_only_a_previous_summary_turn_to_resummarize_returns_false():
     # The degenerate shape: a session compacted before, with exactly keep_recent_turns of new
-    # turns since. The split lands `old` on the previous synthetic pair alone -- re-summarizing
+    # turns since. The split lands `old` on the previous synthetic pair alone — re-summarizing
     # it re-adds the prefix and acknowledgment on top of near-zero information, growing history
     # while the bulky recent turns (the actual reason it's over budget) go untouched.
     llm_registry = LLMRegistry()
@@ -654,7 +654,7 @@ async def test_compact_given_only_a_previous_summary_turn_to_resummarize_returns
 
 async def test_compact_given_only_a_previous_summary_turn_never_calls_the_summarizer():
     # The same degenerate shape, recognized structurally from our own fixed prefix and
-    # acknowledgment text -- so it costs nothing at all, not one wasted summarizer call
+    # acknowledgment text — so it costs nothing at all, not one wasted summarizer call
     # discovering after the fact that the result wouldn't shrink.
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(completion=_summary_completion(_RESUMMARY))
@@ -671,7 +671,7 @@ async def test_compact_given_only_a_previous_summary_turn_never_calls_the_summar
 async def test_compact_given_only_a_previous_summary_and_no_recent_turns_still_refuses():
     # Unconditional: even with nothing else in history (this pair IS the entire history,
     # reached e.g. with keep_recent_turns configured as 0), there's still nothing new to
-    # fold in -- re-summarizing our own prior output alone is refused for free, the same as
+    # fold in — re-summarizing our own prior output alone is refused for free, the same as
     # when other `recent` turns are present. Real compaction resumes automatically once
     # genuinely new content becomes part of `old` again.
     llm_registry = LLMRegistry()
@@ -709,7 +709,7 @@ async def test_compact_given_a_non_shrinking_summary_never_clears_the_usage_esti
     await service.maybe_compact("researcher", session_id, "agent-model")
 
     # The estimate survived the refusal, so the proactive check still fires and calls compact
-    # a second time -- what matters here. History is unchanged between the two, so both hit
+    # a second time — what matters here. History is unchanged between the two, so both hit
     # the structural fast path and neither spends a summarizer call at all.
     assert tracker.get("researcher", session_id) == 900
     assert summarizer.complete_calls == []
@@ -717,7 +717,7 @@ async def test_compact_given_a_non_shrinking_summary_never_clears_the_usage_esti
 
 async def test_compact_given_an_ordinary_two_message_old_portion_still_uses_the_shrink_guard():
     # Same message *count* as the synthetic summary pair the fast path recognizes, but not its
-    # shape -- so the fast path must not swallow it: the summarizer really runs, and the
+    # shape — so the fast path must not swallow it: the summarizer really runs, and the
     # general post-hoc content-length guard is what refuses the non-shrinking result.
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(completion=_summary_completion("y" * 1000))
@@ -748,7 +748,7 @@ async def test_compact_given_a_genuinely_smaller_summary_still_replaces_history(
 
 
 async def test_compact_given_a_summary_smaller_by_only_one_character_still_replaces_history():
-    # The guard rejects "equal or bigger", not "not much smaller" -- a marginal but real
+    # The guard rejects "equal or bigger", not "not much smaller" — a marginal but real
     # reduction must still go through.
     llm_registry = LLMRegistry()
     store, session_id = await _seeded_store([_turn(1), _turn(2)])
@@ -776,7 +776,7 @@ async def test_compact_given_unknown_session_raises_session_not_found_error():
         await service.compact("researcher", "does-not-exist")
 
 
-# -- compact: summarizer retried once --------------------------------------------------------
+# — compact: summarizer retried once --------------------------------------------------------
 
 
 async def test_compact_given_truncated_summary_then_success_stores_the_retried_summary():
@@ -827,7 +827,7 @@ async def test_compact_given_summarizer_llm_error_gives_up_after_exactly_one_att
     assert await store.get("researcher", session_id) == _turn(1) + _turn(2) + _turn(3)
 
 
-# -- compact: chunked (map-reduce) fallback --------------------------------------------------
+# — compact: chunked (map-reduce) fallback --------------------------------------------------
 
 
 def _nine_turns() -> list[list[Message]]:
@@ -935,7 +935,7 @@ async def test_compact_given_chunked_fallback_sends_each_chunk_summary_to_the_re
     await service.compact("researcher", session_id)
 
     reduce_call = summarizer.complete_calls[-1]
-    # A single merged message, not one per chunk plus a separate prompt message -- multiple
+    # A single merged message, not one per chunk plus a separate prompt message — multiple
     # consecutive role="user" messages here would violate the alternation Anthropic-via-
     # Bedrock requires, the same bug class this file's other fixes exist to prevent.
     assert reduce_call == [
@@ -1007,7 +1007,7 @@ async def test_compact_given_the_reduce_call_overflows_returns_false_and_leaves_
 
 
 async def test_compact_given_a_single_old_turn_that_overflows_never_chunks_further():
-    # One turn can't be split into more than one chunk, so there's nothing left to try --
+    # One turn can't be split into more than one chunk, so there's nothing left to try —
     # exactly one summarizer call, and the overflow is not retried with the same input.
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(completion=LLMContextWindowExceededError("too big"))
@@ -1023,7 +1023,7 @@ async def test_compact_given_a_single_old_turn_that_overflows_never_chunks_furth
 
 
 async def test_compact_given_a_smaller_chunk_turns_splits_the_old_portion_into_more_chunks():
-    # 9 turns, keeping 1: the old portion is 8 turns -- 2 chunks of 4 by default, 4 of 2 here.
+    # 9 turns, keeping 1: the old portion is 8 turns — 2 chunks of 4 by default, 4 of 2 here.
     llm_registry = LLMRegistry()
     summarizer = _FakeLLM(
         completion=[LLMContextWindowExceededError("too big"), _summary_completion()]
@@ -1039,11 +1039,11 @@ async def test_compact_given_a_smaller_chunk_turns_splits_the_old_portion_into_m
 
     _single_pass, *chunked = summarizer.complete_calls
     # Four map calls of 2 turns each (2 messages per turn plus the appended prompt), then the
-    # single merged reduce call -- two map calls of 5 messages each with the default of 4.
+    # single merged reduce call — two map calls of 5 messages each with the default of 4.
     assert [len(call) for call in chunked] == [5, 5, 5, 5, 1]
 
 
-# -- logging --------------------------------------------------------------------------------
+# — logging --------------------------------------------------------------------------------
 
 
 async def test_maybe_compact_given_triggered_logs_info(caplog: pytest.LogCaptureFixture):
@@ -1108,7 +1108,7 @@ async def test_compact_given_nothing_older_than_keep_window_logs_debug_not_error
     await service.compact("researcher", session_id)
 
     # The exact bug this milestone's spec review caught: this benign, expected no-op must
-    # never log at ERROR (or WARNING) -- only DEBUG.
+    # never log at ERROR (or WARNING) — only DEBUG.
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
     assert any(r.levelno == logging.DEBUG for r in caplog.records)
 

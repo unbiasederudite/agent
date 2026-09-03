@@ -32,7 +32,17 @@ _STRATEGY_IMPLEMENTATIONS: dict[str, Callable[[], IStrategy]] = {
 
 
 def _build_llm_registry(llm_configs: list[LLMConfig]) -> tuple[LLMRegistry, set[str]]:
-    """Build the LLM registry, raising ConfigError on a duplicate model name."""
+    """Build the LLM registry.
+
+    Args:
+        llm_configs: Startup LLM allow-list.
+
+    Returns:
+        tuple[LLMRegistry, set[str]]: the registry, and its known model names.
+
+    Raises:
+        ConfigError: on a duplicate model name.
+    """
     llm_registry = LLMRegistry()
     seen_models: set[str] = set()
     for llm_config in llm_configs:
@@ -44,7 +54,17 @@ def _build_llm_registry(llm_configs: list[LLMConfig]) -> tuple[LLMRegistry, set[
 
 
 def _build_tool_registry(tool_configs: list[ToolConfig]) -> tuple[ToolRegistry, set[str]]:
-    """Build the tool registry, raising ConfigError on a duplicate name or missing impl."""
+    """Build the tool registry.
+
+    Args:
+        tool_configs: Startup tool allow-list.
+
+    Returns:
+        tuple[ToolRegistry, set[str]]: the registry, and its known tool names.
+
+    Raises:
+        ConfigError: on a duplicate name or missing implementation.
+    """
     tool_registry = ToolRegistry()
     seen_tools: set[str] = set()
     for tool_config in tool_configs:
@@ -61,7 +81,17 @@ def _build_tool_registry(tool_configs: list[ToolConfig]) -> tuple[ToolRegistry, 
 def _build_strategy_registry(
     strategy_configs: list[StrategyConfig],
 ) -> tuple[StrategyRegistry, set[str]]:
-    """Build the strategy registry, raising ConfigError on a duplicate name or missing impl."""
+    """Build the strategy registry.
+
+    Args:
+        strategy_configs: Startup strategy allow-list.
+
+    Returns:
+        tuple[StrategyRegistry, set[str]]: the registry, and its known strategy names.
+
+    Raises:
+        ConfigError: on a duplicate name or missing implementation.
+    """
     strategy_registry = StrategyRegistry()
     seen_strategies: set[str] = set()
     for strategy_config in strategy_configs:
@@ -81,7 +111,20 @@ def _build_agent_registry(
     known_tools: set[str],
     known_strategies: set[str],
 ) -> AgentRegistry:
-    """Build the agent registry, raising ConfigError on any invalid agent declaration."""
+    """Build the agent registry.
+
+    Args:
+        agent_configs: Startup agent allow-list.
+        known_models: Model names already registered.
+        known_tools: Tool names already registered.
+        known_strategies: Strategy names already registered.
+
+    Returns:
+        AgentRegistry: the built registry.
+
+    Raises:
+        ConfigError: on any invalid agent declaration.
+    """
     agent_registry = AgentRegistry()
     seen_agents: set[str] = set()
     for agent_config in agent_configs:
@@ -121,30 +164,17 @@ def build_registries(
     LoggingConfig,
     int | None,
 ]:
-    """Build populated registries plus raw config from an already-loaded `AppConfig`.
+    """Build populated registries from already-parsed startup configuration.
 
-    Takes a parsed `AppConfig`, not a file path -- reading/parsing the config file is I/O,
-    which this factory (like the rest of `core/`) owns none of; the caller (`api/app.py`'s
-    `create_app()`) reads and validates the JSON itself and passes the result in here.
+    Args:
+        config: The startup configuration.
 
-    Returns the registries, `base_prompt`, and the raw `compaction` config. `create_app()`
-    builds `CompactionService` from the raw config, since that also needs `session_store`,
-    a process-level object with no config surface of its own. Also returns the raw `logging`
-    config -- `create_app()` builds its own logging setup from it, since that also needs
-    things (a request-id filter, whether this is even an HTTP context) not owned by this
-    factory, the same reasoning `compaction_config` already documents here. Also returns the
-    raw `max_sessions` value -- `create_app()` passes it straight to `InMemorySessionStore`'s
-    constructor, since this factory has no session-store object of its own to configure.
+    Returns:
+        The four registries, the process-wide `base_prompt`, and the raw `compaction`,
+        `logging`, and `max_sessions` config values.
 
     Raises:
-        ConfigError: if `config` declares a duplicate LLM model, agent name, tool name, or
-            strategy name, an agent's `model` doesn't match any configured LLM, an agent's
-            `strategy` doesn't match any configured strategy, an agent's `tools` entry
-            doesn't match any configured tool or repeats a tool name, a configured tool or
-            strategy name has no matching code-level implementation, `compaction.model`
-            doesn't match any configured LLM, or an agent's `allowed_tools`,
-            `allowed_models`, or `allowed_strategies` entry doesn't match any configured
-            tool, model, or strategy.
+        ConfigError: if `config` is invalid.
     """
     llm_registry, known_models = _build_llm_registry(config.llms)
     tool_registry, known_tools = _build_tool_registry(config.tools)

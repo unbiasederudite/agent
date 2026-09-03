@@ -10,11 +10,8 @@ class ToolCallFunction(BaseModel):
 
     name: str = Field(description="Name of the tool to invoke.")
     arguments: str = Field(
-        description=(
-            "Raw JSON string of arguments. The executing IStrategy parses this with "
-            "json.loads and validates the result against the tool's declared "
-            "`ITool.parameters_model` before invoking it."
-        )
+        description="Raw JSON string of arguments, parsed and schema-validated before "
+        "the tool is invoked."
     )
 
 
@@ -50,6 +47,11 @@ class Message(BaseModel):
 
     @model_validator(mode="after")
     def _validate_role_shape(self) -> "Message":
+        """Enforce each role's required and forbidden fields.
+
+        Raises:
+            ValueError: if a required field is missing, or a forbidden one is set.
+        """
         if self.role == "tool":
             if self.tool_call_id is None:
                 raise ValueError('`tool_call_id` is required when role="tool"')
@@ -67,19 +69,11 @@ class Message(BaseModel):
 def flatten_tool_exchanges_for_no_tools_request(messages: list[Message]) -> list[Message]:
     """Fold each turn's tool exchange into that turn's own final assistant message.
 
-    Makes a message list safe to send to any request that declares no `tools` -- Bedrock's
-    Converse API rejects toolUse / toolResult content blocks outright when `toolConfig` is
-    absent, even for messages merely replaying a prior exchange, so no `role="tool"` message
-    and no message carrying `tool_calls` may reach such a request. Each tool-call request and
-    tool result becomes a readable note folded into the next assistant message the turn
-    produces, which also keeps the strict user/assistant alternation Anthropic-via-Bedrock
-    still requires.
-
     Args:
         messages: The message list to fold.
 
     Returns:
-        An equivalent list with no `role="tool"` message and no `tool_calls`.
+        list[Message]: the flattened message list.
     """
     flattened: list[Message] = []
     pending: list[str] = []

@@ -7,80 +7,89 @@ from agent.core.models.message import Message
 
 
 class ISessionStore(Protocol):
-    """Interface for per-conversation message history storage.
-
-    Async even though the only current implementation (`InMemorySessionStore`) does no
-    I/O -- a durable backend (Redis/SQLite) is the reason this is a protocol at all, and
-    that backend will need to await. Keyed by `(agent, session_id)` together, not
-    `session_id` alone: a session is locked to the agent it was created under, so a lookup
-    under the wrong agent must read as "not found," identical to an unknown session_id.
-    """
+    """Interface for per-conversation message history storage, keyed by (agent, session_id)."""
 
     async def create(self, agent: str) -> str:
-        """Allocate a new session under `agent`, with empty history, and return its id."""
+        """Allocate a new session under `agent`, with empty history, and return its id.
+
+        Args:
+            agent: Agent the new session belongs to.
+
+        Returns:
+            str: the new session's id.
+        """
         ...
 
     async def get(self, agent: str, session_id: str) -> list[Message]:
         """Return the stored history for `(agent, session_id)`.
 
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to read.
+
+        Returns:
+            list[Message]: the session's stored history.
+
         Raises:
-            SessionNotFoundError: if no session exists for this exact `(agent, session_id)`
-                pair -- covers both an unknown id and an id that exists under another agent.
+            SessionNotFoundError: if the session does not exist.
         """
         ...
 
     async def append(self, agent: str, session_id: str, messages: list[Message]) -> None:
         """Extend the stored history for `(agent, session_id)` with `messages`, in order.
 
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to extend.
+            messages: Messages to append.
+
         Raises:
-            SessionNotFoundError: same condition as `get`.
+            SessionNotFoundError: if no session exists for this exact pair.
         """
         ...
 
     async def replace(self, agent: str, session_id: str, messages: list[Message]) -> None:
         """Overwrite the stored history for `(agent, session_id)` with `messages` entirely.
 
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to overwrite.
+            messages: Messages to store in place of the existing history.
+
         Raises:
-            SessionNotFoundError: same condition as `get`.
+            SessionNotFoundError: if no session exists for this exact pair.
         """
         ...
 
     def lock(self, agent: str, session_id: str) -> AbstractAsyncContextManager[None]:
-        """Serialize operations against `(agent, session_id)` across concurrent requests.
+        """Serialize operations against `(agent, session_id)` for read-modify-write correctness.
 
-        Used to guard any read-modify-write sequence spanning more than one call to this
-        store (e.g. `CompactionService.compact()`'s get-summarize-replace) against a
-        concurrent `append()` landing in between and being silently lost. Correctness is
-        backend-specific: an in-process implementation can use a plain lock, but a durable
-        or distributed implementation must provide a lock that's actually correct for its
-        own backend (a distributed lock, a row lock) -- there is no universal way to
-        implement this once at the protocol level.
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to lock.
         """
         ...
 
     def busy(self, agent: str, session_id: str) -> AbstractAsyncContextManager[None]:
-        """Marks `(agent, session_id)` as in-flight for the context's duration.
+        """Mark `(agent, session_id)` as in-flight, rejecting immediately if already held.
 
-        Raises SessionBusyError immediately if another operation already holds it for
-        this same pair -- never waits. Distinct from `lock()`: `lock()` protects a brief
-        store-mutation critical section (an implementation detail internal to one
-        method); `busy()` protects an entire caller-defined operation (e.g. the whole
-        `AgentRunService.run()` body, from before history is even read to after the
-        final append) from a second concurrent operation on the same session, regardless
-        of what either does internally. Two independent requests against the same
-        session, run concurrently, would each read the same starting history and answer
-        without the other's exchange -- silently confusing, not corrupting -- rejecting
-        the second outright avoids that entirely.
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to mark busy.
 
         Raises:
-            SessionBusyError: if another operation already holds `(agent, session_id)`.
+            SessionBusyError: if the session is already busy.
         """
         ...
 
     async def delete(self, agent: str, session_id: str) -> None:
         """Permanently remove `(agent, session_id)` and all its stored history.
 
+        Args:
+            agent: Agent the session belongs to.
+            session_id: Session to delete.
+
         Raises:
-            SessionNotFoundError: if no session exists for this exact pair.
+            SessionNotFoundError: if the session does not exist.
         """
         ...

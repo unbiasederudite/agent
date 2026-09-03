@@ -10,7 +10,7 @@ _MAX_OFFSET_MINUTES = 1439
 
 
 class GetCurrentTimeParams(BaseModel):
-    """Arguments for `GetCurrentTimeTool`."""
+    """Arguments for retrieving the current time."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,7 +22,17 @@ class GetCurrentTimeParams(BaseModel):
     @field_validator("utc_offset_minutes")
     @classmethod
     def _valid_offset(cls, v: int | None) -> int | None:
-        """Reject an out-of-range offset as a normal validation error, not a runtime crash."""
+        """Reject an out-of-range offset as a normal validation error, not a runtime crash.
+
+        Args:
+            v: The offset to validate, in minutes.
+
+        Returns:
+            int | None: `v`, unchanged.
+
+        Raises:
+            ValueError: if the offset is out of range.
+        """
         if v is not None and not (_MIN_OFFSET_MINUTES <= v <= _MAX_OFFSET_MINUTES):
             raise ValueError(
                 f"utc_offset_minutes must be between {_MIN_OFFSET_MINUTES} and "
@@ -32,18 +42,18 @@ class GetCurrentTimeParams(BaseModel):
 
 
 class GetCurrentTimeTool:
-    """Returns the current time, optionally at a UTC offset. No network, no config.
-
-    Stdlib `datetime`/`timedelta` only -- deliberately not `zoneinfo`/IANA zone names, which
-    need a timezone database (`tzdata`) that isn't bundled with Python on Windows.
-    """
+    """Returns the current time, optionally at a UTC offset. No network, no config."""
 
     name = "get_current_time"
     description = "Get the current date and time, optionally at a UTC offset."
     parameters_model: type[BaseModel] = GetCurrentTimeParams
 
     async def execute(self, **kwargs: Any) -> str:
-        """Return the current time as an ISO 8601 string, at `utc_offset_minutes` or UTC."""
+        """Return the current time as an ISO 8601 string, at `utc_offset_minutes` or UTC.
+
+        Returns:
+            str: the current time, in ISO 8601 format.
+        """
         offset_minutes = kwargs.get("utc_offset_minutes")
         tz = UTC if offset_minutes is None else timezone(timedelta(minutes=offset_minutes))
         return datetime.now(tz).isoformat()

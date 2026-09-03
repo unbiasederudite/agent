@@ -7,7 +7,7 @@ from agent.core.models.usage import Usage
 
 
 class Completion(BaseModel):
-    """The result of one ILLM.complete() call."""
+    """The result of one model completion call."""
 
     message: Message = Field(description="The assistant's reply.")
     usage: Usage = Field(description="Token usage for this completion.")

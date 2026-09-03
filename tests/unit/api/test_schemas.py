@@ -1,4 +1,4 @@
-"""Tests for api/schemas.py -- request/response field constraints."""
+"""Tests for api/schemas.py — request/response field constraints."""
 
 import pytest
 from pydantic import ValidationError

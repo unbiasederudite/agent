@@ -1,4 +1,4 @@
-"""ReAct (reason, act, observe) tool-calling loop -- the first IStrategy implementation."""
+"""ReAct (reason, act, observe) tool-calling loop."""
 
 import asyncio
 import json
@@ -16,13 +16,20 @@ from agent.core.protocols.itool import ITool
 
 logger = logging.getLogger(__name__)
 
-_OMITTED_MARKER = "Error: tool result omitted -- aggregate tool-output budget exhausted"
+_OMITTED_MARKER = "Error: tool result omitted — aggregate tool-output budget exhausted"
 _MAX_VALIDATION_ERRORS_SHOWN = 5
 _MAX_VALIDATION_FIELD_CHARS = 200
 
 
 def _tool_schema(tool: ITool) -> dict[str, Any]:
-    """Build an OpenAI-format function schema for `tool`."""
+    """Build an OpenAI-format function schema for `tool`.
+
+    Args:
+        tool: Tool to build a schema for.
+
+    Returns:
+        dict[str, Any]: the OpenAI-format function schema.
+    """
     return {
         "type": "function",
         "function": {
@@ -36,7 +43,12 @@ def _tool_schema(tool: ITool) -> dict[str, Any]:
 def _truncate(content: str, max_chars: int | None) -> str:
     """Cap `content` at `max_chars`, appending a marker noting what was cut.
 
-    `None` means uncapped -- returns `content` unchanged.
+    Args:
+        content: Text to cap.
+        max_chars: Cap in characters. `None` means uncapped.
+
+    Returns:
+        str: `content`, truncated if it exceeded `max_chars`.
     """
     if max_chars is None or len(content) <= max_chars:
         return content
@@ -48,13 +60,13 @@ def _apply_aggregate_budget(
 ) -> tuple[list[Message], int]:
     """Cap the combined tool-result content across a whole run, not just one call.
 
-    Applied once a round's results are known (not predicted beforehand -- calls in a round
-    execute concurrently, so individual result sizes aren't known until they return).
-    Walks `results` in order: once `running_total` has already reached `max_total_chars`,
-    every further result in this round is replaced with a short omission marker instead of
-    its real content. Earlier rounds' already-appended results are never touched -- this
-    only affects what's about to be added. `None` means uncapped; returns `results`
-    unchanged along with the updated running total.
+    Args:
+        results: This round's tool-result messages, in order.
+        running_total: Combined character count already consumed by earlier rounds.
+        max_total_chars: Cap in characters. `None` means uncapped.
+
+    Returns:
+        The updated results and running total.
     """
     if max_total_chars is None:
         return results, running_total + sum(len(message.content or "") for message in results)
@@ -77,19 +89,26 @@ def _apply_aggregate_budget(
 
 
 def _tool_result_message(call: ToolCall, content: str) -> Message:
-    """A role="tool" result message for `call`, the shared shape every result uses."""
+    """Build a role="tool" result message for `call`.
+
+    Args:
+        call: The tool call this result answers.
+        content: The result text.
+
+    Returns:
+        Message: the role="tool" result message.
+    """
     return Message(role="tool", tool_call_id=call.id, name=call.function.name, content=content)
 
 
 def _format_validation_error(exc: ValidationError) -> str:
     """Turn a ValidationError into a short "field: message" list for the LLM to read.
 
-    Pydantic's own str(exc) includes a per-error documentation URL, which is noise for an
-    error whose only audience is the LLM being asked to correct its own tool call. Bounded
-    internally (error count, and each field/message) rather than relying on
-    `max_tool_result_chars` -- unlike this function's sibling fixed error strings, this
-    content echoes back LLM-supplied field names and values, so it isn't actually short and
-    fixed without a cap of its own.
+    Args:
+        exc: The validation error to format.
+
+    Returns:
+        A short, bounded error message.
     """
     errors = exc.errors()
     parts = []
@@ -107,14 +126,18 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 
 def _skipped_call_message(call: ToolCall, max_tool_calls_per_round: int) -> Message:
-    """A fixed, non-truncated result for a tool call skipped by `max_tool_calls_per_round`.
+    """Build a fixed, non-truncated result for a tool call skipped this round.
 
-    Lets the LLM see the call didn't run (and why) instead of silently vanishing -- same
-    convention as `_execute_call`'s other fixed, short error strings, never truncated.
+    Args:
+        call: The skipped tool call.
+        max_tool_calls_per_round: The limit that caused the skip.
+
+    Returns:
+        Message: the role="tool" result message noting the skip.
     """
     return _tool_result_message(
         call,
-        f"Error: skipped -- this round requested more than the "
+        f"Error: skipped — this round requested more than the "
         f"{max_tool_calls_per_round} tool calls allowed at once",
     )
 
@@ -122,14 +145,16 @@ def _skipped_call_message(call: ToolCall, max_tool_calls_per_round: int) -> Mess
 async def _execute_call(
     tools: dict[str, ITool], call: ToolCall, max_tool_result_chars: int | None
 ) -> Message:
-    """Run one tool call and return its result as a role="tool" message.
+    """Run one tool call and return its result as a role="tool" message. Never raises.
 
-    Never raises -- any failure (a tool not offered for this call, bad JSON, arguments that
-    fail schema validation, the tool itself raising, or a tool returning something that
-    isn't a string) becomes the message's error content instead, so the loop can keep going
-    and the LLM can see and react to the failure. `max_tool_result_chars` caps the
-    tool-controlled content only (the success result and the caught-exception message) --
-    our own short, fixed error strings are never truncated.
+    Args:
+        tools: Tools available for this call, by name.
+        call: The tool call to execute.
+        max_tool_result_chars: Cap on the result content, in characters. `None` means
+            uncapped.
+
+    Returns:
+        A role="tool" result message.
     """
     name = call.function.name
     tool = tools.get(name)
@@ -150,7 +175,7 @@ async def _execute_call(
         formatted = _format_validation_error(exc)
         logger.warning("tool '%s' call failed argument validation: %s", name, formatted)
         return _tool_result_message(call, f"Error: invalid arguments: {formatted}")
-    except Exception as exc:  # noqa: BLE001 -- a tool's own validator can raise anything
+    except Exception as exc:  # noqa: BLE001 — a tool's own validator can raise anything
         logger.warning(
             "tool '%s' argument validation raised: %s",
             name,
@@ -167,7 +192,7 @@ async def _execute_call(
             "tool '%s' completed in %.1fms, result length %d", name, duration_ms, len(result)
         )
         return _tool_result_message(call, _truncate(result, max_tool_result_chars))
-    except Exception as exc:  # noqa: BLE001 -- tool can raise anything, or violate -> str; never crash
+    except Exception as exc:  # noqa: BLE001 — tool can raise anything, or violate -> str; never crash
         logger.warning(
             "tool '%s' raised: %s", name, exc, extra={"exception_type": type(exc).__name__}
         )
@@ -177,33 +202,7 @@ async def _execute_call(
 
 
 class ReactStrategy:
-    """The ReAct loop: call the LLM, execute any requested tool calls, repeat.
-
-    Terminates when the LLM responds without `tool_calls`, or after `max_iterations`
-    rounds -- whichever comes first. On hitting the cap, one final call is made with
-    `tools` omitted so the LLM is forced to answer instead of requesting another tool
-    call; that call's own `finish_reason` is returned as-is, nothing invented. `ILLM`
-    implementations flatten tool-shaped content out of any request that declares no
-    `tools`, so what's sent is safe to transmit and what the returned `Turn` carries
-    stays the real exchange. The main loop's own calls get the same protection for free
-    on any run where `tools` is empty (`tool_schemas` is then `None` too) -- no
-    special-casing here for either call.
-
-    The forced-final call additionally appends one scoped, call-only instruction message
-    after `messages`, never stored in `messages` itself and so never part of the returned
-    `Turn` or persisted session history. This is needed, not just polish: if the cap was
-    hit mid-tool-use, `messages` ends on unflushed tool content, and flattening folds
-    that into a trailing synthetic assistant message with nothing after it -- which at
-    least one provider (Anthropic) treats as a prefill to continue, not a request for a
-    fresh reply. Appending a trailing user-role instruction keeps the actual outbound
-    request properly ending on `role="user"`, sidestepping that and making the ask
-    explicit either way.
-
-    `max_tool_calls_per_round` caps how many of one response's tool calls actually execute
-    (the excess are skipped with a short error result each), and
-    `max_tool_results_total_chars` caps the combined result content across the whole run,
-    replacing every result past that budget with a short omission marker.
-    """
+    """The ReAct loop: call the LLM, execute any requested tool calls, repeat."""
 
     async def run(
         self,
@@ -218,7 +217,23 @@ class ReactStrategy:
         max_tool_calls_per_round: int | None = None,
         max_tool_results_total_chars: int | None = None,
     ) -> Turn:
-        """Run the ReAct loop and return the final Turn."""
+        """Run the ReAct loop and return the final Turn.
+
+        Args:
+            messages: The initial message list.
+            llm: The LLM to call.
+            tools: Tools available to invoke, by name.
+            max_iterations: Cap on iterations.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling value.
+            max_tokens: Max output tokens.
+            max_tool_result_chars: Cap on a single tool result's length.
+            max_tool_calls_per_round: Cap on tool calls executed per round.
+            max_tool_results_total_chars: Cap on combined tool-result length for the run.
+
+        Returns:
+            Turn: the run's aggregate result.
+        """
         tool_schemas = [_tool_schema(tool) for tool in tools.values()] or None
 
         messages = list(messages)

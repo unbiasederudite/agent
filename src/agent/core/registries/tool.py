@@ -1,4 +1,4 @@
-"""Registry for mapping tool names to ITool implementations."""
+"""Registry for mapping tool names to their implementations."""
 
 from agent.core.exceptions import ToolNotFoundError
 from agent.core.protocols.itool import ITool
@@ -6,9 +6,10 @@ from agent.core.registries.base import _Registry
 
 
 class ToolRegistry(_Registry[ITool]):
-    """Name-to-instance map of registered ITool implementations.
+    """Name-to-instance map of registered tool implementations.
 
-    `get()` raises `ToolNotFoundError` if the requested name is not registered.
+    Raises:
+        ToolNotFoundError: if the name isn't registered.
     """
 
     def __init__(self) -> None:

@@ -1,4 +1,4 @@
-"""Tests for Turn -- the aggregate result of one IStrategy.run() call."""
+"""Tests for Turn — the aggregate result of one IStrategy.run() call."""
 
 import pytest
 from pydantic import ValidationError

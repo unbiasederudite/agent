@@ -614,7 +614,7 @@ async def test_run_given_context_window_exceeded_compacts_and_retries_once():
 
 
 async def test_run_given_retry_also_overflows_raises_compaction_exhausted_error():
-    # keep_recent_turns is never overridden -- one retry only, no escalation to a more
+    # keep_recent_turns is never overridden — one retry only, no escalation to a more
     # aggressive compaction pass. If that single retry still overflows, the request fails.
     session_store = InMemorySessionStore()
     session_id = await session_store.create("researcher")
@@ -649,7 +649,7 @@ async def test_run_given_compact_returns_false_raises_compaction_exhausted_witho
 
 
 async def test_run_given_no_compaction_service_context_window_exceeded_propagates_plain_error():
-    # Compaction was never available to try, so this must stay the generic overflow error --
+    # Compaction was never available to try, so this must stay the generic overflow error —
     # `CompactionExhaustedError` means specifically "tried everything and it didn't help".
     strategy = _FakeStrategy([LLMContextWindowExceededError("too big"), _turn("unreached")])
     session_store = InMemorySessionStore()
@@ -711,7 +711,7 @@ async def test_run_given_concurrent_compaction_does_not_lose_a_concurrent_append
     llm_registry.register("openai/gpt-4o", object())
     session_store = InMemorySessionStore()
     session_id = await session_store.create("researcher")
-    # Long enough that the summary actually shrinks it -- compact()'s own anti-shrinkage
+    # Long enough that the summary actually shrinks it — compact()'s own anti-shrinkage
     # guard (new summary+ack chars >= old chars -> refuse) would otherwise make it bail
     # out with no replace() at all, for a reason unrelated to the lock being tested here.
     old_message = (
@@ -771,7 +771,7 @@ async def test_run_given_concurrent_compaction_does_not_lose_a_concurrent_append
     await run_task
 
     stored = await session_store.get("researcher", session_id)
-    # All three must be present -- neither operation silently clobbered the other.
+    # All three must be present — neither operation silently clobbered the other.
     assert any("a summary" in (m.content or "") for m in stored)
     assert any(m.content == "new message" for m in stored)
     assert any(m.content == "appended reply" for m in stored)
@@ -900,7 +900,7 @@ async def test_run_given_new_session_does_not_require_it_be_free():
     strategy = _FakeStrategy(_turn())
     service = _service(strategy, session_store=session_store)
 
-    run = await service.run("hello", "researcher")  # session_id=None -- nothing to be busy
+    run = await service.run("hello", "researcher")  # session_id=None — nothing to be busy
 
     assert run.session_id is not None
 
@@ -921,11 +921,11 @@ async def test_run_releases_busy_after_an_error_so_a_later_call_succeeds():
     strategy = _FakeStrategy(AgentNotFoundError("nope"))
     service = _service(strategy, session_store=session_store, agent=_researcher_agent())
 
-    with pytest.raises(Exception):  # noqa: B017, PT011 -- whatever the fake strategy raises
+    with pytest.raises(Exception):  # noqa: B017, PT011 — whatever the fake strategy raises
         await service.run("hello", "researcher", session_id=session_id)
 
     async with session_store.busy("researcher", session_id):
-        pass  # must not raise SessionBusyError -- the prior call released it
+        pass  # must not raise SessionBusyError — the prior call released it
 
 
 async def test_run_given_tool_outside_allowed_tools_raises_tool_not_allowed_error():
@@ -1074,7 +1074,7 @@ async def test_run_given_strategy_outside_allowed_strategies_logs_info(
 
 async def test_run_given_unregistered_model_with_allowed_models_set_raises_not_found():
     # An unregistered model must read as "doesn't exist" (404), never "exists but isn't
-    # permitted for this agent" (403) -- registry existence is checked before the
+    # permitted for this agent" (403) — registry existence is checked before the
     # allowed_models ceiling regardless of what that ceiling says.
     strategy = _FakeStrategy(_turn())
     agent = _researcher_agent(allowed_models=["openai/gpt-4o"])

@@ -154,7 +154,7 @@ async def test_complete_given_empty_choices_raises_llm_error(monkeypatch: pytest
     with pytest.raises(LLMError):
         await adapter.complete([Message(role="user", content="hi")])
 
-    # A malformed response is a model/prompt issue, not a transient failure -- it must
+    # A malformed response is a model/prompt issue, not a transient failure — it must
     # not be retried (an empty `choices` list has no .status_code, so the retry loop's
     # own classification would otherwise treat it as one and burn the whole budget).
     assert mock_acompletion.call_count == 1
@@ -413,7 +413,7 @@ async def test_complete_given_no_tools_flattens_tool_exchanges_out_of_outbound_m
     monkeypatch: pytest.MonkeyPatch,
 ):
     # Bedrock's Converse API rejects toolUse/toolResult blocks in a request with no toolConfig,
-    # even when they only replay an earlier exchange -- so a no-tools call must never send them.
+    # even when they only replay an earlier exchange — so a no-tools call must never send them.
     mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
     monkeypatch.setattr("litellm.acompletion", mock_acompletion)
     adapter = LiteLLMAdapter(model="openai/gpt-4o")
@@ -430,7 +430,7 @@ async def test_complete_given_no_tools_flattens_tool_exchanges_out_of_outbound_m
 async def test_complete_given_empty_tools_list_flattens_tool_exchanges_too(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # `[]` is as much "no tools declared" as `None` is -- the adapter must not rely on callers
+    # `[]` is as much "no tools declared" as `None` is — the adapter must not rely on callers
     # having normalized one to the other.
     mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
     monkeypatch.setattr("litellm.acompletion", mock_acompletion)
@@ -449,7 +449,7 @@ async def test_complete_given_no_tools_history_ending_on_tool_result_flattens_to
     monkeypatch: pytest.MonkeyPatch,
 ):
     # Unlike `_tool_exchange_history()` (which ends on a real assistant reply), history cut off
-    # mid-tool-use has nothing after the last tool result -- `flush()` folds it into a brand-new
+    # mid-tool-use has nothing after the last tool result — `flush()` folds it into a brand-new
     # synthetic assistant message with nothing after it. `ReactStrategy`'s forced-final call is
     # the one caller that can reach this shape (see its own docstring); this proves what actually
     # goes out on the wire in that case, which is why that caller appends a trailing instruction.
@@ -751,7 +751,7 @@ async def test_complete_given_retry_delay_caps_at_max_delay(monkeypatch: pytest.
 async def test_complete_given_malformed_response_raises_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # A message with neither content nor tool_calls is our own raised LLMError -- a
+    # A message with neither content nor tool_calls is our own raised LLMError — a
     # persistently malformed response is a model/prompt issue, not a transient failure.
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
@@ -770,7 +770,7 @@ async def test_complete_given_malformed_response_raises_without_retry(
 async def test_complete_given_unexpected_response_shape_raises_llm_error_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # response.usage is missing entirely -- an AttributeError while constructing
+    # response.usage is missing entirely — an AttributeError while constructing
     # Completion, not the two already-covered shape problems (empty choices, no
     # content/tool_calls). Same "malformed response, don't retry" contract should apply.
     response = SimpleNamespace(
@@ -863,7 +863,7 @@ async def test_complete_given_at_capacity_raises_immediately_without_calling_lit
     mock_acompletion = AsyncMock(return_value=_fake_litellm_response())
     monkeypatch.setattr("litellm.acompletion", mock_acompletion)
     adapter = LiteLLMAdapter(model="openai/gpt-4o", max_concurrent_requests=1)
-    adapter._in_flight = 1  # simulate one call already in flight
+    adapter._in_flight = 1
 
     with pytest.raises(LLMOverloadedError):
         await adapter.complete([Message(role="user", content="hi")])

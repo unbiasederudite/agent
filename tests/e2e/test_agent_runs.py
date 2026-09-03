@@ -96,7 +96,7 @@ def test_agent_runs_given_tiny_token_budget_compacts_and_still_recalls_early_fac
     assert "teal" in final.json()["message"]["content"].lower()
     # A plain, ever-growing history would send flat-to-more prompt_tokens each turn. A drop
     # here is near-impossible without a real compaction pass having shrunk stored history in
-    # between -- this is what actually discriminates "compaction ran" from "it didn't need to".
+    # between — this is what actually discriminates "compaction ran" from "it didn't need to".
     assert last_filler_response is not None
     assert (
         final.json()["usage"]["prompt_tokens"]

@@ -1,4 +1,4 @@
-"""Registry for mapping strategy names to IStrategy implementations."""
+"""Registry for mapping strategy names to their reasoning-loop implementations."""
 
 from agent.core.exceptions import StrategyNotFoundError
 from agent.core.protocols.istrategy import IStrategy
@@ -6,9 +6,10 @@ from agent.core.registries.base import _Registry
 
 
 class StrategyRegistry(_Registry[IStrategy]):
-    """Name-to-instance map of registered IStrategy implementations.
+    """Name-to-instance map of registered reasoning-strategy implementations.
 
-    `get()` raises `StrategyNotFoundError` if the requested name is not registered.
+    Raises:
+        StrategyNotFoundError: if the name isn't registered.
     """
 
     def __init__(self) -> None:

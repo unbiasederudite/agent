@@ -295,7 +295,7 @@ async def test_touching_a_session_protects_it_from_the_next_eviction():
     store = InMemorySessionStore(max_sessions=2)
     first_id = await store.create("researcher")
     second_id = await store.create("researcher")
-    await store.get("researcher", first_id)  # touch first -- now second is oldest
+    await store.get("researcher", first_id)  # touch first — now second is oldest
 
     await store.create("researcher")
 

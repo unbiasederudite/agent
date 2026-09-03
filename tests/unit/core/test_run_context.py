@@ -1,4 +1,4 @@
-"""Tests for core/run_context.py -- the (agent, session_id) correlation ContextVar."""
+"""Tests for core/run_context.py — the (agent, session_id) correlation ContextVar."""
 
 from agent.core.run_context import current_run_context, run_context, update_session_id
 

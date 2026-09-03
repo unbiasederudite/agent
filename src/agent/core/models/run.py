@@ -19,7 +19,7 @@ class Run(BaseModel):
     )
     session_id: str = Field(
         description=(
-            "The session this execution belongs to -- the given session_id, echoed back, "
+            "The session this execution belongs to — the given session_id, echoed back, "
             "or a newly created one if none was given."
         )
     )

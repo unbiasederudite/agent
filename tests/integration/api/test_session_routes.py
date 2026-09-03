@@ -1,4 +1,4 @@
-"""Tests for api/app.py's session lifecycle routes -- GET and DELETE."""
+"""Tests for api/app.py's session lifecycle routes — GET and DELETE."""
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

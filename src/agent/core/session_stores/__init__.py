@@ -1,1 +1,1 @@
-"""ISessionStore implementations."""
+"""Session-history storage implementations."""

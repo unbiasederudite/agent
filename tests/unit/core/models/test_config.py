@@ -41,7 +41,7 @@ def test_llm_config_given_negative_temperature_raises_validation_error():
 
 def test_llm_config_given_temperature_above_two_still_constructs():
     # No upper bound: provider-specific (2 for OpenAI, 1 for Anthropic), left for the
-    # provider itself to reject -- matches AgentRunRequest.temperature in api/schemas.py.
+    # provider itself to reject — matches AgentRunRequest.temperature in api/schemas.py.
     config = LLMConfig(model="openai/gpt-4o", temperature=2.1)
 
     assert config.temperature == 2.1
@@ -158,7 +158,7 @@ def test_agent_config_given_sampling_params_constructs():
 
 
 def test_agent_config_given_top_p_above_one_raises_validation_error():
-    # AgentConfig inherits SamplingDefaults' bounds the same way LLMConfig does -- one
+    # AgentConfig inherits SamplingDefaults' bounds the same way LLMConfig does — one
     # confirming test here, full bound coverage lives on the LLMConfig tests above.
     with pytest.raises(ValidationError):
         AgentConfig(

@@ -409,7 +409,7 @@ def test_build_given_agent_allowed_tools_references_unknown_tool_raises_config_e
 
 def test_build_given_agent_allowed_models_references_unknown_model_raises_config_error():
     # allowed_models includes the agent's own model (openai/gpt-4o) so AgentConfig's own
-    # _defaults_within_ceilings validator is satisfied at construction time -- the extra
+    # _defaults_within_ceilings validator is satisfied at construction time — the extra
     # "nonexistent_model" entry is what exercises build_registries()'s own cross-reference
     # check (not the agent's own model/ceiling self-consistency, already covered in
     # tests/unit/core/models/test_config.py).

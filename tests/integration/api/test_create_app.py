@@ -98,7 +98,7 @@ def test_create_app_given_unmatched_route_returns_message_shaped_detail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     # Starlette's own framework-raised 404 (no matching route) has a plain-string `detail`
-    # by default -- handle_http_exception normalizes it to the same {"message": ...} shape
+    # by default — handle_http_exception normalizes it to the same {"message": ...} shape
     # every app-raised error uses, so callers can always read detail["message"].
     monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
     config_path = tmp_path / "app_config.json"
@@ -434,7 +434,7 @@ def test_create_app_given_message_exceeds_max_input_chars_returns_413(
 def test_create_app_given_message_exceeds_max_input_chars_logs_only_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # agent_run.py already logs this at INFO before raising InputTooLargeError --
+    # agent_run.py already logs this at INFO before raising InputTooLargeError —
     # handle_http_exception must not log a second INFO line for the same 400 response.
     monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=_fake_litellm_response()))
     config_path = _agent_config_path(tmp_path, max_input_chars=5)
@@ -454,11 +454,7 @@ def test_create_app_given_message_exceeds_max_input_chars_logs_only_once(
 def test_create_app_given_compaction_configured_wires_and_invokes_compaction_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A `compaction` block in config makes create_app() build a real, working service.
-
-    Once recorded usage crosses the tiny configured budget, the next call to the same
-    session compacts first, actually calling the configured summarizer.
-    """
+    """Once usage crosses the tiny configured budget, the next call compacts first."""
     summary_response = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -545,7 +541,7 @@ def test_create_app_given_compaction_cannot_help_returns_413_compaction_exhauste
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     # Second call: the agent call overflows, and every compaction tier fails too (the
-    # summarizer overflows as well, and a one-turn history can't be chunked) -- the
+    # summarizer overflows as well, and a one-turn history can't be chunked) — the
     # exhausted case, which must map to its own code, not the generic overflow one.
     import litellm
 
@@ -738,7 +734,7 @@ def test_create_app_given_max_sessions_wires_it_into_the_session_store(
 
     get_first = client.get(f"/v1/agents/researcher/sessions/{first.json()['session_id']}")
     get_second = client.get(f"/v1/agents/researcher/sessions/{second.json()['session_id']}")
-    assert get_first.status_code == 404  # evicted -- max_sessions=1
+    assert get_first.status_code == 404  # evicted — max_sessions=1
     assert get_second.status_code == 200
 
 
