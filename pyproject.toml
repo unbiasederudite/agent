@@ -1,8 +1,10 @@
 [project]
-name = "agent"
+name = "agent-core"
 version = "0.1.0"
 description = "A lightweight, extensible Python core for building AI agents"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Mykhailo Stasiuk", email = "erudite1854@proton.me" }
 ]
@@ -28,6 +30,10 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent"
+module-root = "src"
 
 [tool.ruff]
 target-version = "py313"

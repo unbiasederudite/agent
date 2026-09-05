@@ -1,4 +1,4 @@
-# agent
+# agent-core
 
 [![CI](https://github.com/unbiasederudite/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/unbiasederudite/agent/actions/workflows/ci.yml)
 
@@ -145,3 +145,7 @@ uv run mypy --strict src/
 uv run pytest tests/unit/ tests/integration/ -q
 E2E_TESTS=1 uv run pytest tests/e2e/ -q
 ```
+
+## License
+
+[MIT](LICENSE)
