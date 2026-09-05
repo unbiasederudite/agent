@@ -1,15 +1,21 @@
 """CLI entrypoint for running the agent API server."""
 
 import argparse
+import sys
 from pathlib import Path
 
 import uvicorn
 
 from agent.api.app import create_app
+from agent.core.exceptions import ConfigError
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse CLI arguments, build the app, and start the uvicorn server."""
+    """Parse CLI arguments, build the app, and start the uvicorn server.
+
+    Args:
+        argv: Arguments to parse. `None` uses `sys.argv`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m agent.api", description="Run the agent-core agent API."
     )
@@ -20,7 +26,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000).")
     args = parser.parse_args(argv)
 
-    app = create_app(args.config)
+    try:
+        app = create_app(args.config)
+    except ConfigError as exc:
+        print(f"Fatal: {exc}", file=sys.stderr)
+        sys.exit(1)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

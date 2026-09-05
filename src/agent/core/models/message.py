@@ -10,11 +10,8 @@ class ToolCallFunction(BaseModel):
 
     name: str = Field(description="Name of the tool to invoke.")
     arguments: str = Field(
-        description=(
-            "Raw JSON string of arguments. The executing IStrategy parses this with "
-            "json.loads, but nothing validates the result against the tool's declared "
-            "`ITool.parameters` schema."
-        )
+        description="Raw JSON string of arguments, parsed and schema-validated before "
+        "the tool is invoked."
     )
 
 
@@ -50,6 +47,11 @@ class Message(BaseModel):
 
     @model_validator(mode="after")
     def _validate_role_shape(self) -> "Message":
+        """Enforce each role's required and forbidden fields.
+
+        Raises:
+            ValueError: if a required field is missing, or a forbidden one is set.
+        """
         if self.role == "tool":
             if self.tool_call_id is None:
                 raise ValueError('`tool_call_id` is required when role="tool"')
@@ -62,3 +64,40 @@ class Message(BaseModel):
         elif self.content is None and not self.tool_calls:
             raise ValueError("either `content` or `tool_calls` must be given")
         return self
+
+
+def flatten_tool_exchanges_for_no_tools_request(messages: list[Message]) -> list[Message]:
+    """Fold each turn's tool exchange into that turn's own final assistant message.
+
+    Args:
+        messages: The message list to fold.
+
+    Returns:
+        list[Message]: the flattened message list.
+    """
+    flattened: list[Message] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        if pending:
+            flattened.append(Message(role="assistant", content="\n".join(pending)))
+            pending.clear()
+
+    for message in messages:
+        if message.role == "tool":
+            pending.append(f"[tool {message.name!r} returned: {message.content}]")
+        elif message.tool_calls:
+            if message.content:
+                pending.append(message.content)
+            pending.extend(
+                f"[called tool {call.function.name!r} with {call.function.arguments}]"
+                for call in message.tool_calls
+            )
+        elif message.role == "assistant":
+            pending.append(message.content or "")
+            flush()
+        else:
+            flush()
+            flattened.append(message)
+    flush()
+    return flattened

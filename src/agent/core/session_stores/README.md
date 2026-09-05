@@ -5,7 +5,4 @@ history storage, keyed by `(agent, session_id)`.
 
 ## Contents
 
-- `in_memory.py` — `InMemorySessionStore`, backed by a process-local dict. No durability (lost on
-  restart), no eviction, no locking (single-threaded `asyncio`, no `await` mid-mutation). The only
-  implementation this milestone; a durable backend (Redis/SQLite) can be added later behind the
-  same protocol without touching any caller.
+- `in_memory.py` — `InMemorySessionStore`, an in-process, non-durable `ISessionStore` backed by a dict, bounded by `max_sessions` via LRU eviction.

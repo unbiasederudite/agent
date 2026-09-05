@@ -44,3 +44,17 @@ def test_main_given_host_and_port_args_overrides_defaults(
     _, kwargs = mock_run.call_args
     assert kwargs["host"] == "0.0.0.0"
     assert kwargs["port"] == 9000
+
+
+def test_main_given_invalid_config_prints_fatal_message_and_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    config_path = tmp_path / "app_config.json"
+    config_path.write_text("not json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--config", str(config_path)])
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Fatal:" in captured.err

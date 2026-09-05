@@ -1,7 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
-from agent.core.models.message import Message, ToolCall, ToolCallFunction
+from agent.core.models.message import (
+    Message,
+    ToolCall,
+    ToolCallFunction,
+    flatten_tool_exchanges_for_no_tools_request,
+)
 
 
 def test_message_given_valid_role_and_content_constructs():
@@ -108,3 +113,68 @@ def test_message_given_non_tool_role_defaults_tool_call_id_to_none():
     message = Message(role="user", content="hi")
 
     assert message.tool_call_id is None
+
+
+# — flatten_tool_exchanges_for_no_tools_request ---------------------------------------------
+
+
+def _turn(n: int) -> list[Message]:
+    """One plain turn: a user message and an assistant reply."""
+    return [
+        Message(role="user", content=f"question {n}"),
+        Message(role="assistant", content=f"answer {n}"),
+    ]
+
+
+def _tool_turn(n: int) -> list[Message]:
+    """One turn with a tool exchange: user, tool-call request, tool result, final answer."""
+    return [
+        Message(role="user", content=f"question {n}"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id=f"call_{n}",
+                    function=ToolCallFunction(name="echo", arguments='{"text":"hi"}'),
+                )
+            ],
+        ),
+        Message(role="tool", tool_call_id=f"call_{n}", name="echo", content="hi"),
+        Message(role="assistant", content=f"answer {n}"),
+    ]
+
+
+def test_flatten_given_plain_turns_returns_them_unchanged():
+    history = _turn(1) + _turn(2)
+
+    assert flatten_tool_exchanges_for_no_tools_request(history) == history
+
+
+def test_flatten_given_tool_exchange_emits_no_tool_messages_or_tool_calls():
+    flattened = flatten_tool_exchanges_for_no_tools_request(_tool_turn(1))
+
+    assert all(message.role != "tool" and message.tool_calls is None for message in flattened)
+
+
+def test_flatten_given_tool_exchange_keeps_roles_alternating():
+    flattened = flatten_tool_exchanges_for_no_tools_request(_turn(1) + _tool_turn(2))
+
+    assert [message.role for message in flattened] == ["user", "assistant", "user", "assistant"]
+
+
+def test_flatten_folds_the_tool_exchange_into_the_turns_final_answer():
+    flattened = flatten_tool_exchanges_for_no_tools_request(_tool_turn(1))
+
+    assert flattened[-1].content == (
+        "[called tool 'echo' with {\"text\":\"hi\"}]\n[tool 'echo' returned: hi]\nanswer 1"
+    )
+
+
+def test_flatten_given_a_turn_with_no_final_answer_still_keeps_the_tool_exchange():
+    flattened = flatten_tool_exchanges_for_no_tools_request(_tool_turn(1)[:-1])
+
+    assert flattened[-1] == Message(
+        role="assistant",
+        content="[called tool 'echo' with {\"text\":\"hi\"}]\n[tool 'echo' returned: hi]",
+    )

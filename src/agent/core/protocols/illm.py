@@ -19,10 +19,25 @@ class ILLM(Protocol):
     ) -> Completion:
         """Send messages to an LLM and return its completion.
 
-        `temperature`/`top_p`/`max_tokens` of `None` mean "use this implementation's
-        configured default," not "omit this param from consideration entirely." `tools`,
-        if given, is a list of OpenAI-format function schemas offered to the LLM; the LLM
-        may respond with `tool_calls` on the returned `Completion.message` instead of (or
-        without) `content` -- this call never executes them.
+        Args:
+            messages: The conversation history to send.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling value.
+            max_tokens: Max output tokens.
+            tools: OpenAI-format function schemas to offer the model.
+
+        Returns:
+            Completion: the model's response.
+        """
+        ...
+
+    def max_input_tokens(self) -> int:
+        """Return this model's maximum input token count, via a synchronous local lookup.
+
+        Returns:
+            int: the model's maximum input token count.
+
+        Raises:
+            LLMError: if the underlying provider has no known limit for this model.
         """
         ...

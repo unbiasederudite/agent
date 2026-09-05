@@ -10,7 +10,7 @@ from agent.core.registries.agent import AgentRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
-from agent.core.tools.get_current_time import GetCurrentTimeTool
+from agent.core.tools.get_current_time import GetCurrentTimeParams, GetCurrentTimeTool
 
 
 class _FakeLLM:
@@ -85,7 +85,7 @@ def test_list_tools_returns_registered_tools_with_schema():
     body = response.json()
     assert body[0]["name"] == "get_current_time"
     assert body[0]["description"]
-    assert body[0]["parameters"] == {"type": "object", "properties": {}}
+    assert body[0]["parameters"] == GetCurrentTimeParams.model_json_schema()
 
 
 def test_list_models_returns_registered_model_names():

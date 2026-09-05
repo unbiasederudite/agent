@@ -4,4 +4,8 @@ Use-case orchestration, called by inbound adapters.
 
 ## Contents
 
-- `agent_run.py` — `AgentRunService`, resolves a required agent (and optional model/strategy/tools override) by name, builds the initial system+user messages (merging the process-wide `base_prompt`, if configured, into the agent's `system_prompt`), resolves tool names against `ToolRegistry` into instances before the strategy ever runs, threads a session's stored history (via `ISessionStore`) between the system message and the new user turn when `session_id` is given, and delegates to the selected `IStrategy` to run the reasoning loop and produce a `Run`
+- `agent_run.py` — `AgentRunService`, the entry point for one agent turn: resolves config, runs the strategy, manages compaction and session history, and checks the input/output guardrail checkpoints.
+- `compaction.py` — `CompactionService`, keeps a session's stored history under its configured token budget.
+- `context_tracker.py` — `ContextFootprintTracker`, tracks each session's current context-token footprint.
+- `cost_tracker.py` — `CostTracker`, tracks cumulative token/cost usage per session and per agent.
+- `session_service.py` — `SessionService`, session-lifecycle operations: reading history and usage, deleting a session.

@@ -4,9 +4,11 @@ Inbound HTTP adapter. Thin translation layer between HTTP and `core/services/` �
 
 ## Contents
 
-- `schemas.py` — backend-native request/response models. `AgentRunRequest`/`AgentRunResponse` model `POST /v1/agents/{agent_name}` (`message` as a plain string, optional `model`/`strategy`/`temperature`/`top_p`/`max_tokens` overrides, tri-state `tools`: omitted uses the agent's tools, `[]` suppresses them, a list overrides them; optional `session_id` continues an existing conversation, omitted starts a new one). Tool calls requested by the LLM are executed server-side and fed back automatically (up to `AgentConfig.max_tool_iterations`). The response `message`/`usage` reuse `core.models.message.Message` and `core.models.usage.Usage` directly rather than duplicating identical DTOs — `models` is cross-cutting per `ARCHITECTURE.md`, so there's nothing to translate for those. `AgentRunResponse` stays its own model rather than reusing `core.models.run.Run` directly, keeping the API-facing DTO independent of the internal domain model. `AgentSummary`/`ToolSummary` model the `GET /v1/agents`/`GET /v1/tools` listing entries — deliberately reduced projections (`AgentSummary` omits `AgentConfig.system_prompt` and sampling defaults) rather than reusing the core models, since exposing those isn't safe.
-- `app.py` — `create_app(config_path)` builds the FastAPI app from an `AppConfig` JSON file. `add_agent_run_route()` registers `POST /v1/agents/{agent_name}`; `add_registry_routes()` registers `GET /v1/agents`, `GET /v1/tools`, `GET /v1/models`, `GET /v1/strategies`; `add_exception_handlers()` registers a 400 handler for request-validation failures and a 500 catch-all — every other status (404/429/502/504/500 from `AgentError` subclasses, and framework 404/405s) is FastAPI's own `HTTPException`/Starlette handling.
-- `__main__.py` — CLI entrypoint: parses `--config`/`--host`/`--port` and starts the server
+- `schemas.py` — backend-native request/response models for the agent-run and registry-listing routes.
+- `app.py` — `create_app(config_path)` builds and wires the FastAPI app: routes, middleware, and exception handlers.
+- `logging_setup.py` — JSON/text log formatting, handlers, and correlation filters.
+- `request_context.py` — request-id correlation middleware and its logging filter.
+- `__main__.py` — CLI entrypoint: parses `--config`/`--host`/`--port` and starts the server.
 
 ## Running
 
@@ -16,4 +18,38 @@ Inbound HTTP adapter. Thin translation layer between HTTP and `core/services/` �
 
 ## Endpoints
 
-See the root `README.md`'s Endpoints section for the full request/response contract.
+Full request/response schemas: `/docs` (Swagger UI) or `/redoc`, once the server is running.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/agents/{agent_name}` | Run an agent against a message, continuing a session or starting a new one. |
+| `GET` | `/v1/agents/{agent_name}/sessions/{session_id}` | Read a session's stored history. |
+| `GET` | `/v1/agents/{agent_name}/sessions/{session_id}/usage` | Read a session's token/cost usage. |
+| `DELETE` | `/v1/agents/{agent_name}/sessions/{session_id}` | Delete a session and its history. |
+| `GET` | `/v1/agents` | List registered agents. |
+| `GET` | `/v1/agents/{agent_name}/usage` | Read an agent's cumulative token/cost usage. |
+| `GET` | `/v1/tools` | List registered tools. |
+| `GET` | `/v1/models` | List registered model id strings. |
+| `GET` | `/v1/strategies` | List registered reasoning strategy names. |
+| `GET` | `/health` | Liveness check. |
+
+## Errors
+
+Every error body is `{"detail": {"message": "...", "code": "...", "request_id": "..."}}` —
+`code` and `request_id` are present only where noted below.
+
+| Status | `code` | Meaning |
+|---|---|---|
+| 403 | `tool_not_allowed` / `model_not_allowed` / `strategy_not_allowed` | Not permitted for this agent. |
+| 404 | `agent_not_found` / `model_not_found` / `strategy_not_found` / `session_not_found` / `tool_not_found` / `guardrail_not_found` | Named resource not registered. |
+| 404 / 405 | *(none)* | Unmatched route or method. |
+| 409 | `session_busy` | Session already in use by another request. |
+| 413 | `input_too_large` | `message` exceeds the agent's `max_input_chars`. |
+| 413 | `context_window_exceeded` | Overflowed the model's context window; compaction unavailable. |
+| 413 | `compaction_exhausted` | Overflowed the context window; compaction was tried and didn't help. |
+| 422 | `guardrail_blocked` | A block-action input or output guardrail triggered. |
+| 429 | *(none)* | Provider rate-limited the request. Carries a `Retry-After` header. |
+| 500 | *(none)* | Unhandled server error. Body includes `request_id`. |
+| 502 | *(none)* | Other LLM call failure. Body includes `request_id`. |
+| 503 | *(none)* | Model's `max_concurrent_requests` cap reached. Carries a `Retry-After` header. |
+| 504 | *(none)* | Provider request timed out, or the agent's `max_request_seconds` was exceeded. |

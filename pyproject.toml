@@ -1,14 +1,17 @@
 [project]
-name = "agent"
+name = "agent-core"
 version = "0.1.0"
 description = "A lightweight, extensible Python core for building AI agents"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Mykhailo Stasiuk", email = "erudite1854@proton.me" }
 ]
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.141.1",
+    "guardrails-ai>=0.11.0",
     "litellm>=1.96.2",
     "pydantic>=2.13.4",
     "uvicorn>=0.52.3",
@@ -27,6 +30,10 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent"
+module-root = "src"
 
 [tool.ruff]
 target-version = "py313"
@@ -49,6 +56,10 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = "litellm.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "guardrails.*"
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

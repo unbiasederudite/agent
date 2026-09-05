@@ -1,4 +1,4 @@
-"""Aggregate result of one IStrategy.run() call."""
+"""Aggregate result of one reasoning-loop run."""
 
 from pydantic import BaseModel, Field
 
@@ -7,12 +7,7 @@ from agent.core.models.usage import Usage
 
 
 class Turn(BaseModel):
-    """Everything one IStrategy.run() call generated -- not the input it was given.
-
-    Distinct from `Completion` (`core/models/completion.py`), which is the result of a
-    single `ILLM.complete()` wire call. A strategy's run spans however many of those calls
-    it makes; `Turn` is the aggregate across all of them.
-    """
+    """Everything one reasoning-loop run generated."""
 
     messages: list[Message] = Field(
         min_length=1,
@@ -23,14 +18,19 @@ class Turn(BaseModel):
         ),
     )
     usage: Usage = Field(description="Token usage summed across every LLM call this run made.")
+    final_total_tokens: int = Field(
+        description="total_tokens of the last individual LLM call this run made, not "
+        "summed across the run."
+    )
     finish_reason: str = Field(
-        description=(
-            "The finish_reason of whichever LLM call produced the final message -- never "
-            "invented, never aggregated (unlike usage)."
-        )
+        description="The finish_reason of whichever LLM call produced the final message."
     )
 
     @property
     def message(self) -> Message:
-        """The final answer -- always `messages[-1]`. A run always generates at least one."""
+        """The final answer — always `messages[-1]`. A run always generates at least one.
+
+        Returns:
+            Message: the final answer.
+        """
         return self.messages[-1]

@@ -6,5 +6,4 @@ request routes through (currently `ReactStrategy`, `core/strategies/`).
 
 ## Contents
 
-- `get_current_time.py` -- `GetCurrentTimeTool`, returns the current UTC time as an ISO
-  8601 string. No parameters, no network, no config.
+- `get_current_time.py` — `GetCurrentTimeTool`, returns the current time, optionally at a UTC offset.

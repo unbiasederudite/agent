@@ -1,4 +1,4 @@
-"""Generic name-to-instance registry base, shared by LLMRegistry, AgentRegistry, ToolRegistry."""
+"""Generic name-to-instance registry base for typed registries."""
 
 from collections.abc import Callable
 
@@ -10,22 +10,31 @@ class _Registry[T]:
         """Initialize an empty registry.
 
         Args:
-            not_found_error: Exception type to raise (called with the missing name) when
-                `get()` is called for an unregistered name.
+            not_found_error: Exception type raised on a missing name.
         """
         self._items: dict[str, T] = {}
         self._not_found_error = not_found_error
 
     def register(self, name: str, item: T) -> None:
-        """Register `item` under `name`."""
+        """Register `item` under `name`.
+
+        Args:
+            name: Lookup key.
+            item: Instance to register.
+        """
         self._items[name] = item
 
     def get(self, name: str) -> T:
         """Return the registered item for `name`.
 
+        Args:
+            name: Lookup key.
+
+        Returns:
+            T: the registered item.
+
         Raises:
-            The exception passed as `not_found_error` at construction, if `name` is not
-            registered.
+            The registered `not_found_error` exception.
         """
         try:
             return self._items[name]
@@ -33,5 +42,9 @@ class _Registry[T]:
             raise self._not_found_error(name) from None
 
     def all(self) -> dict[str, T]:
-        """Return a copy of every registered `name -> instance` mapping."""
+        """Return a copy of every registered `name -> instance` mapping.
+
+        Returns:
+            dict[str, T]: the registered instances, by name.
+        """
         return dict(self._items)

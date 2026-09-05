@@ -1,4 +1,4 @@
-"""Registry for mapping agent names to AgentConfig."""
+"""Registry for mapping agent names to their configuration."""
 
 from agent.core.exceptions import AgentNotFoundError
 from agent.core.models.config import AgentConfig
@@ -6,9 +6,10 @@ from agent.core.registries.base import _Registry
 
 
 class AgentRegistry(_Registry[AgentConfig]):
-    """Name-to-instance map of registered AgentConfig entries.
+    """Name-to-instance map of registered agent configuration entries.
 
-    `get()` raises `AgentNotFoundError` if the requested name is not registered.
+    Raises:
+        AgentNotFoundError: if the name isn't registered.
     """
 
     def __init__(self) -> None:

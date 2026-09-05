@@ -36,6 +36,11 @@ One assertion concept per test, named `test_<what>_<when>_<expected>`. Structure
 
 ## Documentation
 
-- Docstrings: Google convention (ruff `D` rules enforce it). Comments: non-obvious rationale only, never a restatement of the line.
+- Docstrings: Google convention (ruff `D` rules enforce it) — one-line summary, then only `Args:`/`Returns:`/`Raises:`/`Yields:` as applicable, nothing else. Each entry is a short "what it is" phrase, never behavior, edge cases, or rationale. Complete always: every parameter and every non-`None` return gets an entry, regardless of arity, visibility, or whether the summary hints at it. The only exemption is a signature fixed by an external base class/protocol this codebase doesn't control — never a pattern the codebase merely repeats on its own — plus small decorator-registered closures (routes, exception handlers) whose contract lives in the docs instead.
+- Pydantic `Field(description=...)` follows the same rule as docstrings.
+- Comments: non-obvious rationale only, never a restatement of the line.
+- Every docstring, comment, and `Field` description is standalone — never names another module, class, service, or function. Only root `README.md`, `ARCHITECTURE.md`, and per-folder `README.md` files may cross-reference other units.
+- A genuinely cross-cutting fact (an invariant, a provider quirk, a system-wide contract) that would otherwise live only in a docstring or comment belongs in `ARCHITECTURE.md` instead — trim the docstring, add the fact there.
+- Per-folder `README.md`: a one-sentence purpose statement plus one line per file/symbol — an index, not a design doc. No behavioral deep-dives; that's what the code and its docstrings are for.
 - Every `src/` folder gets a short `README.md` (purpose + contents); update it when the folder's contents change.
 - After any change to an interface, config shape, or entry point: update `README.md`, `ARCHITECTURE.md`, and any affected per-folder `README.md`.

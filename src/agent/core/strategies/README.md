@@ -5,7 +5,4 @@ Selected per-agent via `AgentConfig.strategy`, or per-request via `AgentRunReque
 
 ## Contents
 
-- `react.py` — `ReactStrategy`, the ReAct loop: call the LLM, execute any requested tool
-  calls concurrently, feed the results back as `role="tool"` messages, repeat up to
-  `AgentConfig.max_tool_iterations`. On hitting that cap, forces one final call with tools
-  omitted so the LLM answers instead of requesting another tool call.
+- `react.py` — `ReactStrategy`, the ReAct tool-calling loop.

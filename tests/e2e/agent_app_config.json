@@ -21,8 +21,21 @@
       "system_prompt": "You are a helpful assistant with a good memory. Answer concisely.",
       "model": "openai/gpt-4o-mini",
       "strategy": "react"
+    },
+    {
+      "name": "compacting-bot",
+      "system_prompt": "You are a helpful assistant. Answer in one short sentence.",
+      "model": "openai/gpt-4o-mini",
+      "strategy": "react",
+      "temperature": 0
     }
   ],
+  "compaction": {
+    "model": "openai/gpt-4o-mini",
+    "token_budget_pct": 0.003125,
+    "keep_recent_turns": 4,
+    "prompt": "Summarize the conversation above concisely. Preserve the task's goal, key decisions, established constraints, and any facts, preferences, or results later turns may need to reference \u2014 especially any specific fact the user stated about themselves (e.g. a stated preference, name, or personal detail), even if later turns moved on to a different topic. Never omit a user-stated personal fact. Omit small talk and resolved intermediate steps that carry no such facts."
+  },
   "logging": {
     "level": "INFO"
   }

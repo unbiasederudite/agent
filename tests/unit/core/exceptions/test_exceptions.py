@@ -4,10 +4,16 @@ from agent.core.exceptions import (
     ConfigError,
     LLMError,
     LLMNotFoundError,
+    LLMOverloadedError,
     LLMRateLimitedError,
     LLMTimeoutError,
+    ModelNotAllowedError,
+    RequestTimeoutError,
+    SessionBusyError,
     SessionNotFoundError,
+    StrategyNotAllowedError,
     StrategyNotFoundError,
+    ToolNotAllowedError,
     ToolNotFoundError,
 )
 
@@ -46,3 +52,27 @@ def test_strategy_not_found_error_is_agent_error():
 
 def test_session_not_found_error_is_agent_error():
     assert issubclass(SessionNotFoundError, AgentError)
+
+
+def test_llm_overloaded_error_is_llm_error():
+    assert issubclass(LLMOverloadedError, LLMError)
+
+
+def test_session_busy_error_is_agent_error():
+    assert issubclass(SessionBusyError, AgentError)
+
+
+def test_request_timeout_error_is_agent_error():
+    assert issubclass(RequestTimeoutError, AgentError)
+
+
+def test_tool_not_allowed_error_is_agent_error():
+    assert issubclass(ToolNotAllowedError, AgentError)
+
+
+def test_model_not_allowed_error_is_agent_error():
+    assert issubclass(ModelNotAllowedError, AgentError)
+
+
+def test_strategy_not_allowed_error_is_agent_error():
+    assert issubclass(StrategyNotAllowedError, AgentError)
