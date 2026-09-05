@@ -5,6 +5,7 @@ from agent.core.models.config import (
     AgentConfig,
     AppConfig,
     CompactionConfig,
+    GuardrailConfig,
     LLMConfig,
     LoggingConfig,
     StrategyConfig,
@@ -749,3 +750,34 @@ def test_compaction_config_given_unknown_field_raises_validation_error():
 def test_logging_config_given_unknown_field_raises_validation_error():
     with pytest.raises(ValidationError):
         LoggingConfig.model_validate({"levle": "DEBUG"})
+
+
+def test_guardrail_config_given_only_name_and_validator_id_uses_defaults():
+    guardrail = GuardrailConfig(name="no-pii", validator_id="guardrails/detect_pii")
+
+    assert guardrail.validator_params == {}
+    assert guardrail.action == "block"
+
+
+def test_guardrail_config_rejects_extra_field():
+    with pytest.raises(ValidationError):
+        GuardrailConfig(name="no-pii", validator_id="guardrails/detect_pii", bogus="x")
+
+
+def test_agent_config_guardrail_lists_default_to_empty():
+    agent = AgentConfig(
+        name="researcher",
+        system_prompt="You are helpful.",
+        model="openai/gpt-4o",
+        strategy="react",
+    )
+
+    assert agent.input_guardrails == []
+    assert agent.tool_output_guardrails == []
+    assert agent.output_guardrails == []
+
+
+def test_app_config_guardrails_defaults_to_empty_list():
+    config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}]})
+
+    assert config.guardrails == []

@@ -30,6 +30,8 @@ from agent.core.exceptions import (
     AgentNotFoundError,
     CompactionExhaustedError,
     ConfigError,
+    GuardrailBlockedError,
+    GuardrailNotFoundError,
     InputTooLargeError,
     LLMContextWindowExceededError,
     LLMError,
@@ -57,7 +59,6 @@ from agent.core.services.compaction import CompactionService
 from agent.core.services.context_tracker import ContextFootprintTracker
 from agent.core.services.cost_tracker import CostTracker
 from agent.core.services.session_service import SessionService
-from agent.core.session_stores.in_memory import InMemorySessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,13 @@ _UNIFORM_ERROR_MAP: dict[type[Exception], tuple[int, str]] = {
     StrategyNotFoundError: (404, "strategy_not_found"),
     SessionNotFoundError: (404, "session_not_found"),
     ToolNotFoundError: (404, "tool_not_found"),
+    GuardrailNotFoundError: (404, "guardrail_not_found"),
     InputTooLargeError: (413, "input_too_large"),
     SessionBusyError: (409, "session_busy"),
     ToolNotAllowedError: (403, "tool_not_allowed"),
     ModelNotAllowedError: (403, "model_not_allowed"),
     StrategyNotAllowedError: (403, "strategy_not_allowed"),
+    GuardrailBlockedError: (422, "guardrail_blocked"),
 }
 
 
@@ -238,6 +241,7 @@ def add_agent_run_route(app: FastAPI, agent_run_service: AgentRunService) -> Non
             model=run.model,
             message=run.response,
             usage=run.usage,
+            supporting_usage=run.supporting_usage,
             finish_reason=run.finish_reason,
             session_id=run.session_id,
         )
@@ -402,13 +406,14 @@ def create_app(config_path: Path) -> FastAPI:
         agent_registry,
         tool_registry,
         strategy_registry,
+        guardrail_registry,
+        session_store,
         base_prompt,
         compaction_config,
         logging_config,
         max_sessions,
     ) = build_registries(config)
     configure_logging(logging_config, RequestIdFilter(), RunContextFilter())
-    session_store = InMemorySessionStore(max_sessions=max_sessions)
     cost_tracker = CostTracker(max_sessions=max_sessions)
     context_tracker = ContextFootprintTracker(max_sessions=max_sessions)
     compaction_service = (
@@ -426,6 +431,7 @@ def create_app(config_path: Path) -> FastAPI:
         compaction_service,
         cost_tracker=cost_tracker,
         context_tracker=context_tracker,
+        guardrail_registry=guardrail_registry,
     )
     session_service = SessionService(
         session_store, cost_tracker=cost_tracker, context_tracker=context_tracker
@@ -440,11 +446,13 @@ def create_app(config_path: Path) -> FastAPI:
     add_session_routes(app, session_service)
     add_usage_routes(app, agent_registry, cost_tracker)
     logger.info(
-        "agent-core started: %d agent(s), %d tool(s), %d LLM(s), %d strategy(s), compaction=%s",
+        "agent-core started: %d agent(s), %d tool(s), %d LLM(s), %d strategy(s), "
+        "%d guardrail(s), compaction=%s",
         len(agent_registry.all()),
         len(tool_registry.all()),
         len(llm_registry.all()),
         len(strategy_registry.all()),
+        len(guardrail_registry.all()),
         "enabled" if compaction_config is not None else "disabled",
     )
     return app

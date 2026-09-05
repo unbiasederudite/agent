@@ -4,6 +4,7 @@ from typing import Protocol
 
 from agent.core.models.message import Message
 from agent.core.models.turn import Turn
+from agent.core.protocols.iguardrail import IGuardrail
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
 
@@ -23,6 +24,7 @@ class IStrategy(Protocol):
         max_tool_result_chars: int | None = None,
         max_tool_calls_per_round: int | None = None,
         max_tool_results_total_chars: int | None = None,
+        tool_output_guardrails: list[IGuardrail] | None = None,
     ) -> Turn:
         """Run the loop and return the final Turn.
 
@@ -37,6 +39,8 @@ class IStrategy(Protocol):
             max_tool_result_chars: Cap on a single tool result's length.
             max_tool_calls_per_round: Cap on tool calls executed per round.
             max_tool_results_total_chars: Cap on combined tool-result length for the run.
+            tool_output_guardrails: Guardrails checked against each tool result before it's
+                added to context.
 
         Returns:
             Turn: the run's aggregate result.

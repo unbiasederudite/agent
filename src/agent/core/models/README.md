@@ -9,4 +9,5 @@ Pydantic data models: domain models and startup config.
 - `completion.py` — `Completion`, the result of one `ILLM.complete()` call
 - `turn.py` — `Turn`, the aggregate result of one reasoning-loop run
 - `run.py` — `Run`, the domain record of one completion execution
-- `config.py` — the startup config models loaded once from JSON: `SamplingDefaults`, `LLMConfig`, `AgentConfig`, `ToolConfig`, `StrategyConfig`, `CompactionConfig`, `LoggingConfig`, and root `AppConfig`
+- `guardrail.py` — `GuardrailFinding`, the result of one `IGuardrail.check()` call
+- `config.py` — the startup config models loaded once from JSON: `SamplingDefaults`, `LLMConfig`, `AgentConfig`, `ToolConfig`, `StrategyConfig`, `GuardrailConfig`, `CompactionConfig`, `LoggingConfig`, and root `AppConfig`

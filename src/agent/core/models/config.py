@@ -1,6 +1,6 @@
 """Pydantic config models for application startup."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -117,6 +117,24 @@ class StrategyConfig(BaseModel):
     )
 
 
+class GuardrailConfig(BaseModel):
+    """One entry in the startup guardrail allow-list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="The guardrail's lookup key, referenced by agents.")
+    validator_id: str = Field(
+        description='Guardrails AI Hub validator id, e.g. "guardrails/detect_pii".'
+    )
+    validator_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Keyword arguments passed to the resolved validator's constructor.",
+    )
+    action: Literal["block", "redact", "warn"] = Field(
+        default="block", description="What happens when this guardrail triggers."
+    )
+
+
 class AgentConfig(SamplingDefaults):
     """One entry in the startup agent allow-list."""
 
@@ -128,6 +146,15 @@ class AgentConfig(SamplingDefaults):
     )
     tools: list[str] = Field(
         default_factory=list, description="Tool names available to this agent by default."
+    )
+    input_guardrails: list[str] = Field(
+        default_factory=list, description="Guardrails checked against the incoming message."
+    )
+    tool_output_guardrails: list[str] = Field(
+        default_factory=list, description="Guardrails checked against each tool result."
+    )
+    output_guardrails: list[str] = Field(
+        default_factory=list, description="Guardrails checked against the final response."
     )
     max_tool_iterations: int = Field(
         default=10, ge=1, description="Cap on tool-calling loop rounds."
@@ -214,6 +241,17 @@ class CompactionConfig(BaseModel):
     )
 
 
+class SessionStoreConfig(BaseModel):
+    """Session-history storage settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(
+        default="in_memory",
+        description="The session store's lookup key, matching a code-level implementation.",
+    )
+
+
 class AppConfig(BaseModel):
     """Root startup configuration, loaded once from a JSON file."""
 
@@ -230,6 +268,10 @@ class AppConfig(BaseModel):
         default_factory=list,
         description="The allow-list of reasoning strategies available to this process.",
     )
+    guardrails: list[GuardrailConfig] = Field(
+        default_factory=list,
+        description="The allow-list of guardrails available to this process.",
+    )
     base_prompt: str | None = Field(
         default=None, description="Prepended before every agent's own `system_prompt`."
     )
@@ -238,6 +280,9 @@ class AppConfig(BaseModel):
     )
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig, description="Logging configuration."
+    )
+    session_store: SessionStoreConfig = Field(
+        default_factory=SessionStoreConfig, description="Session-history storage settings."
     )
     max_sessions: int | None = Field(
         default=None, ge=1, description="Cap on how many distinct sessions are kept at once."

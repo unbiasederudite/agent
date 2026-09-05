@@ -55,7 +55,11 @@ class AgentRunResponse(BaseModel):
         description="The litellm-format provider/model string that ran this request."
     )
     message: Message = Field(description="The generated reply message.")
-    usage: Usage = Field(description="Token usage for this run.")
+    usage: Usage = Field(description="Token usage for this run's own turn.")
+    supporting_usage: Usage = Field(
+        description="Token usage from this run's own supporting LLM calls — a guardrail "
+        "check, a compaction summary — separate from the turn above."
+    )
     finish_reason: str = Field(description="Why generation stopped.")
     session_id: str = Field(description="Session id this response belongs to.")
 

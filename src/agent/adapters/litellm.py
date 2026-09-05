@@ -26,6 +26,8 @@ from agent.core.models.usage import Usage
 
 logger = logging.getLogger(__name__)
 
+litellm.telemetry = False
+
 
 def _first_not_none[T](a: T | None, b: T | None) -> T | None:
     """Return `a`, or `b` if `a` is `None`.

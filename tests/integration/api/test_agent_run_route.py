@@ -9,6 +9,8 @@ from agent.api.request_context import RequestIdMiddleware
 from agent.core.exceptions import (
     AgentError,
     AgentNotFoundError,
+    GuardrailBlockedError,
+    GuardrailNotFoundError,
     LLMError,
     LLMNotFoundError,
     LLMOverloadedError,
@@ -196,6 +198,15 @@ def test_run_agent_given_unknown_tool_returns_404():
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "tool_not_found"
+
+
+def test_run_agent_given_unknown_guardrail_returns_404():
+    client = _client_for(GuardrailNotFoundError("nope"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "hi"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "guardrail_not_found"
 
 
 def test_run_agent_given_unknown_session_id_returns_404():
@@ -473,3 +484,14 @@ def test_run_agent_given_request_timeout_returns_504():
     response = client.post("/v1/agents/researcher", json={"message": "hi"})
 
     assert response.status_code == 504
+
+
+def test_run_agent_given_guardrail_blocked_error_returns_422():
+    client = _client_for(GuardrailBlockedError("blocked by guardrail 'no_profanity'"))
+
+    response = client.post("/v1/agents/researcher", json={"message": "trigger"})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["message"] == "blocked by guardrail 'no_profanity'"
+    assert detail["code"] == "guardrail_blocked"

@@ -16,6 +16,7 @@ from agent.core.models.config import CompactionConfig
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
 from agent.core.models.usage import Usage
 from agent.core.registries.llm import LLMRegistry
+from agent.core.run_context import collect_extra_usage, run_context
 from agent.core.services.compaction import (
     CompactionService,
     _chunk_by_turns,
@@ -763,6 +764,19 @@ async def test_compact_given_a_summary_smaller_by_only_one_character_still_repla
 
     assert compacted is True
     assert await store.get("researcher", session_id) == _compacted(_turn(2), summary)
+
+
+async def test_compact_given_active_run_records_summarizer_usage_into_it():
+    llm_registry = LLMRegistry()
+    llm_registry.register("summarizer", _FakeLLM(completion=_summary_completion("gist")))
+    store, session_id = await _seeded_store([_turn(n) for n in range(1, 6)])
+    tracker = ContextFootprintTracker()
+    service = CompactionService(llm_registry, store, _config(keep_recent_turns=1), tracker)
+
+    with run_context("researcher", session_id):
+        await service.compact("researcher", session_id)
+
+        assert collect_extra_usage().total_tokens == 10
 
 
 async def test_compact_given_unknown_session_raises_session_not_found_error():

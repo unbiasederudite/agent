@@ -6,6 +6,7 @@ import time
 from contextlib import AbstractAsyncContextManager, nullcontext
 
 from agent.core.exceptions import (
+    AgentError,
     CompactionExhaustedError,
     InputTooLargeError,
     LLMContextWindowExceededError,
@@ -17,12 +18,15 @@ from agent.core.exceptions import (
 from agent.core.models.message import Message
 from agent.core.models.run import Run
 from agent.core.models.turn import Turn
+from agent.core.models.usage import sum_usage
+from agent.core.protocols.iguardrail import IGuardrail, run_guardrails
 from agent.core.protocols.isession_store import ISessionStore
 from agent.core.registries.agent import AgentRegistry
+from agent.core.registries.guardrail import GuardrailRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
-from agent.core.run_context import run_context, update_session_id
+from agent.core.run_context import collect_extra_usage, run_context, update_session_id
 from agent.core.services.compaction import CompactionService
 from agent.core.services.context_tracker import ContextFootprintTracker
 from agent.core.services.cost_tracker import CostTracker
@@ -57,6 +61,7 @@ class AgentRunService:
         compaction_service: CompactionService | None = None,
         cost_tracker: CostTracker | None = None,
         context_tracker: ContextFootprintTracker | None = None,
+        guardrail_registry: GuardrailRegistry | None = None,
     ) -> None:
         """Initialize with its registries and dependencies.
 
@@ -70,6 +75,8 @@ class AgentRunService:
             compaction_service: Keeps a session's history under a token budget.
             cost_tracker: Cumulative per-session/per-agent token and cost usage.
             context_tracker: Each session's current context-token footprint.
+            guardrail_registry: Registered guardrail implementations, resolved by name from
+                an agent's guardrail-name lists.
         """
         self._llm_registry = llm_registry
         self._agent_registry = agent_registry
@@ -82,6 +89,27 @@ class AgentRunService:
         self._context_tracker = (
             context_tracker if context_tracker is not None else ContextFootprintTracker()
         )
+        self._guardrail_registry = guardrail_registry
+
+    def _resolve_guardrails(self, names: list[str]) -> list[IGuardrail]:
+        """Resolve guardrail names to instances via the registered `GuardrailRegistry`.
+
+        Args:
+            names: Guardrail names to resolve.
+
+        Returns:
+            list[IGuardrail]: the resolved guardrails, in order. Empty if `names` is empty.
+
+        Raises:
+            AgentError: `names` is non-empty but no `GuardrailRegistry` was injected.
+        """
+        if not names:
+            return []
+        if self._guardrail_registry is None:
+            raise AgentError(
+                f"guardrails {names} are configured but no guardrail registry was injected"
+            )
+        return self._guardrail_registry.get_many(names)
 
     async def run(
         self,
@@ -130,6 +158,7 @@ class AgentRunService:
             LLMError: the underlying LLM call failed.
             SessionBusyError: another operation is already using `session_id`.
             RequestTimeoutError: the call exceeded the agent's `max_request_seconds`.
+            GuardrailBlockedError: a block-action input or output guardrail triggered.
         """
         busy_guard: AbstractAsyncContextManager[None] = (
             self._session_store.busy(agent, session_id) if session_id is not None else nullcontext()
@@ -194,6 +223,7 @@ class AgentRunService:
                 exhausted.
             LLMError: the underlying LLM call failed.
             RequestTimeoutError: the call exceeded the agent's `max_request_seconds`.
+            GuardrailBlockedError: a block-action input or output guardrail triggered.
         """
         start = time.monotonic()
         agent_config = self._agent_registry.get(agent)
@@ -235,7 +265,7 @@ class AgentRunService:
             )
 
         tool_names = tools if tools is not None else agent_config.tools
-        resolved_tools = {name: self._tool_registry.get(name) for name in tool_names}
+        resolved_tools = self._tool_registry.get_many(tool_names)
         if agent_config.allowed_tools is not None:
             disallowed = [name for name in tool_names if name not in agent_config.allowed_tools]
             if disallowed:
@@ -250,9 +280,16 @@ class AgentRunService:
             effective_strategy,
         )
 
-        user_message = Message(role="user", content=message)
+        user_message: Message | None = None
 
         async def _run_within_deadline() -> Turn:
+            nonlocal user_message
+            input_guardrails = self._resolve_guardrails(agent_config.input_guardrails)
+            effective_message = message
+            if input_guardrails:
+                effective_message = await run_guardrails(message, input_guardrails)
+            user_message = Message(role="user", content=effective_message)
+
             if session_id is not None and self._compaction_service is not None:
                 await self._compaction_service.maybe_compact(agent, session_id, effective_model)
 
@@ -263,6 +300,7 @@ class AgentRunService:
             resolved_top_p = _first_not_none(top_p, agent_config.top_p)
             resolved_max_tokens = _first_not_none(max_tokens, agent_config.max_tokens)
 
+            tool_output_guardrails = self._resolve_guardrails(agent_config.tool_output_guardrails)
             llm = self._llm_registry.get(effective_model)
             strategy_instance = self._strategy_registry.get(effective_strategy)
 
@@ -278,10 +316,11 @@ class AgentRunService:
                     max_tool_result_chars=agent_config.max_tool_result_chars,
                     max_tool_calls_per_round=agent_config.max_tool_calls_per_round,
                     max_tool_results_total_chars=agent_config.max_tool_results_total_chars,
+                    tool_output_guardrails=tool_output_guardrails or None,
                 )
 
             try:
-                return await _call_strategy(messages)
+                turn = await _call_strategy(messages)
             except LLMContextWindowExceededError as exc:
                 logger.warning(
                     "context window overflow for agent=%s session=%s despite the proactive check",
@@ -304,23 +343,28 @@ class AgentRunService:
                         retried = True
                     except LLMContextWindowExceededError:
                         pass
-                if retried:
-                    logger.info(
-                        "reactive compact-and-retry succeeded for agent=%s session=%s",
+                if not retried:
+                    logger.error(
+                        "reactive compact-and-retry exhausted for agent=%s session=%s, "
+                        "raising CompactionExhaustedError",
                         agent,
                         session_id,
+                        exc_info=True,
+                        extra={"exception_type": "CompactionExhaustedError"},
                     )
-                    assert result is not None
-                    return result
-                logger.error(
-                    "reactive compact-and-retry exhausted for agent=%s session=%s, "
-                    "raising CompactionExhaustedError",
+                    raise CompactionExhaustedError(str(exc)) from exc
+                logger.info(
+                    "reactive compact-and-retry succeeded for agent=%s session=%s",
                     agent,
                     session_id,
-                    exc_info=True,
-                    extra={"exception_type": "CompactionExhaustedError"},
                 )
-                raise CompactionExhaustedError(str(exc)) from exc
+                assert result is not None
+                turn = result
+
+            output_guardrails = self._resolve_guardrails(agent_config.output_guardrails)
+            if output_guardrails and turn.message.content is not None:
+                turn.message.content = await run_guardrails(turn.message.content, output_guardrails)
+            return turn
 
         try:
             if agent_config.max_request_seconds is not None:
@@ -342,12 +386,15 @@ class AgentRunService:
                 f"agent '{agent}' exceeded its {agent_config.max_request_seconds}s request budget"
             ) from exc
 
+        assert user_message is not None
+
         if session_id is None:
             session_id = await self._session_store.create(agent)
             update_session_id(session_id)
         async with self._session_store.lock(agent, session_id):
             await self._session_store.append(agent, session_id, [user_message, *turn.messages])
-        self._cost_tracker.record(agent, session_id, turn.usage)
+        supporting_usage = collect_extra_usage()
+        self._cost_tracker.record(agent, session_id, sum_usage(turn.usage, supporting_usage))
         self._context_tracker.record(agent, session_id, turn.final_total_tokens)
 
         duration_ms = (time.monotonic() - start) * 1000
@@ -364,6 +411,7 @@ class AgentRunService:
             model=effective_model,
             response=turn.message,
             usage=turn.usage,
+            supporting_usage=supporting_usage,
             finish_reason=turn.finish_reason,
             session_id=session_id,
         )

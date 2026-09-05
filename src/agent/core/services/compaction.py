@@ -10,6 +10,7 @@ from agent.core.models.message import Message
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.isession_store import ISessionStore
 from agent.core.registries.llm import LLMRegistry
+from agent.core.run_context import record_extra_usage
 from agent.core.services.context_tracker import ContextFootprintTracker
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,7 @@ class CompactionService:
                 extra={"exception_type": type(exc).__name__},
             )
             return _SummaryOutcome(status="llm_error")
+        record_extra_usage(completion.usage)
         if completion.finish_reason == "length":
             if is_retry:
                 logger.error(

@@ -1,24 +1,36 @@
 """Factory for building runtime registries from configuration."""
 
 from collections.abc import Callable
+from typing import Any
 
+from agent.adapters import guardrails_ai
+from agent.adapters.guardrails_ai import GuardrailsAIAdapter
 from agent.adapters.litellm import LiteLLMAdapter
+from agent.adapters.llm_registry_provider import (
+    LLM_REGISTRY_PROVIDER,
+    register_llm_registry_provider,
+)
 from agent.core.exceptions import ConfigError
 from agent.core.models.config import (
     AgentConfig,
     AppConfig,
     CompactionConfig,
+    GuardrailConfig,
     LLMConfig,
     LoggingConfig,
+    SessionStoreConfig,
     StrategyConfig,
     ToolConfig,
 )
+from agent.core.protocols.isession_store import ISessionStore
 from agent.core.protocols.istrategy import IStrategy
 from agent.core.protocols.itool import ITool
 from agent.core.registries.agent import AgentRegistry
+from agent.core.registries.guardrail import GuardrailRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
+from agent.core.session_stores.in_memory import InMemorySessionStore
 from agent.core.strategies.react import ReactStrategy
 from agent.core.tools.get_current_time import GetCurrentTimeTool
 
@@ -28,6 +40,10 @@ _TOOL_IMPLEMENTATIONS: dict[str, Callable[[], ITool]] = {
 
 _STRATEGY_IMPLEMENTATIONS: dict[str, Callable[[], IStrategy]] = {
     "react": ReactStrategy,
+}
+
+_SESSION_STORE_IMPLEMENTATIONS: dict[str, Callable[[int | None], ISessionStore]] = {
+    "in_memory": InMemorySessionStore,
 }
 
 
@@ -105,6 +121,91 @@ def _build_strategy_registry(
     return strategy_registry, seen_strategies
 
 
+def _enforce_llm_callable(
+    validator_cls: type, validator_id: str, validator_params: dict[str, Any], known_models: set[str]
+) -> dict[str, Any]:
+    """Require and redirect a validator's `llm_callable` constructor argument, if it has one.
+
+    Args:
+        validator_cls: The validator's already-resolved class.
+        validator_id: Guardrails AI Hub id, for error messages.
+        validator_params: The guardrail's configured validator constructor arguments.
+        known_models: Model names registered in this process's LLM registry.
+
+    Returns:
+        dict[str, Any]: `validator_params`, with `llm_callable` rewritten to route through
+            the registered LLM, if the resolved validator declares that parameter.
+            Unchanged otherwise.
+
+    Raises:
+        ConfigError: the validator declares `llm_callable`, but `validator_params` omits
+            it or sets it to a name not in `known_models`.
+    """
+    if not guardrails_ai.declares_llm_callable(validator_cls):
+        return validator_params
+    llm_callable = validator_params.get("llm_callable")
+    if llm_callable not in known_models:
+        raise ConfigError(
+            f"validator '{validator_id}' declares an 'llm_callable' constructor argument — "
+            f"validator_params must set it to a model name registered in this process's "
+            f"'llms' config (got: {llm_callable!r})"
+        )
+    # The prefix is what makes litellm dispatch this call to this codebase's own registered
+    # custom provider instead of a real one — litellm strips it before handing the rest of
+    # the string to the handler, which resolves what's left against the same LLM registry.
+    return {**validator_params, "llm_callable": f"{LLM_REGISTRY_PROVIDER}/{llm_callable}"}
+
+
+def _build_guardrail_registry(
+    guardrail_configs: list[GuardrailConfig],
+    known_models: set[str],
+    llm_registry: LLMRegistry,
+) -> tuple[GuardrailRegistry, set[str]]:
+    """Build the guardrail registry.
+
+    Args:
+        guardrail_configs: Startup guardrail allow-list.
+        known_models: Model names already registered, for `llm_callable` enforcement.
+        llm_registry: Registry `llm_callable`-declaring validators are redirected through.
+
+    Returns:
+        tuple[GuardrailRegistry, set[str]]: the registry, and its known guardrail names.
+
+    Raises:
+        ConfigError: on a duplicate name, an unresolvable validator id, or a validator's
+            `llm_callable` argument missing or unregistered.
+    """
+    guardrail_registry = GuardrailRegistry()
+    seen_guardrails: set[str] = set()
+    if guardrail_configs:
+        register_llm_registry_provider(llm_registry)
+    for guardrail_config in guardrail_configs:
+        if guardrail_config.name in seen_guardrails:
+            raise ConfigError(f"duplicate guardrail name in config: {guardrail_config.name}")
+        seen_guardrails.add(guardrail_config.name)
+        try:
+            validator_cls = guardrails_ai.resolve_validator(guardrail_config.validator_id)
+            validator_params = _enforce_llm_callable(
+                validator_cls,
+                guardrail_config.validator_id,
+                guardrail_config.validator_params,
+                known_models,
+            )
+            adapter = GuardrailsAIAdapter(
+                guardrail_config.name,
+                guardrail_config.validator_id,
+                validator_params,
+                guardrail_config.action,
+                validator_cls=validator_cls,
+            )
+        except ConfigError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a Hub validator's constructor can raise anything
+            raise ConfigError(f"guardrail '{guardrail_config.name}': {exc}") from exc
+        guardrail_registry.register(guardrail_config.name, adapter)
+    return guardrail_registry, seen_guardrails
+
+
 def _build_agent_registry(
     agent_configs: list[AgentConfig],
     known_models: set[str],
@@ -152,6 +253,53 @@ def _build_agent_registry(
     return agent_registry
 
 
+def _build_session_store(config: SessionStoreConfig, max_sessions: int | None) -> ISessionStore:
+    """Build the session store.
+
+    Args:
+        config: Session store settings.
+        max_sessions: Cap on how many distinct sessions are kept at once.
+
+    Returns:
+        ISessionStore: the built session store.
+
+    Raises:
+        ConfigError: no implementation is registered for the configured type.
+    """
+    implementation = _SESSION_STORE_IMPLEMENTATIONS.get(config.type)
+    if implementation is None:
+        raise ConfigError(f"no session store implementation registered for: {config.type}")
+    return implementation(max_sessions)
+
+
+def _validate_guardrail_list(
+    agent_name: str, list_name: str, guardrail_names: list[str], known_guardrails: set[str]
+) -> None:
+    """Validate one of an agent's guardrail-checkpoint lists against what's registered.
+
+    Args:
+        agent_name: The agent declaring this list, for error messages.
+        list_name: Which checkpoint list this is, for error messages.
+        guardrail_names: The names to validate.
+        known_guardrails: Guardrail names already registered.
+
+    Raises:
+        ConfigError: a name is unknown, or a name is duplicated within the list.
+    """
+    seen: set[str] = set()
+    for guardrail_name in guardrail_names:
+        if guardrail_name not in known_guardrails:
+            raise ConfigError(
+                f"agent '{agent_name}' declares unknown guardrail in {list_name}: {guardrail_name}"
+            )
+        if guardrail_name in seen:
+            raise ConfigError(
+                f"agent '{agent_name}' declares duplicate guardrail in {list_name}: "
+                f"{guardrail_name}"
+            )
+        seen.add(guardrail_name)
+
+
 def build_registries(
     config: AppConfig,
 ) -> tuple[
@@ -159,6 +307,8 @@ def build_registries(
     AgentRegistry,
     ToolRegistry,
     StrategyRegistry,
+    GuardrailRegistry,
+    ISessionStore,
     str | None,
     CompactionConfig | None,
     LoggingConfig,
@@ -170,8 +320,8 @@ def build_registries(
         config: The startup configuration.
 
     Returns:
-        The four registries, the process-wide `base_prompt`, and the raw `compaction`,
-        `logging`, and `max_sessions` config values.
+        The five registries, the built session store, the process-wide `base_prompt`, and the
+        raw `compaction`, `logging`, and `max_sessions` config values.
 
     Raises:
         ConfigError: if `config` is invalid.
@@ -179,9 +329,13 @@ def build_registries(
     llm_registry, known_models = _build_llm_registry(config.llms)
     tool_registry, known_tools = _build_tool_registry(config.tools)
     strategy_registry, known_strategies = _build_strategy_registry(config.strategies)
+    guardrail_registry, known_guardrails = _build_guardrail_registry(
+        config.guardrails, known_models, llm_registry
+    )
     agent_registry = _build_agent_registry(
         config.agents, known_models, known_tools, known_strategies
     )
+    session_store = _build_session_store(config.session_store, config.max_sessions)
     if config.compaction is not None and config.compaction.model not in known_models:
         raise ConfigError(f"compaction declares unknown model: {config.compaction.model}")
 
@@ -207,12 +361,29 @@ def build_registries(
                         f"agent '{agent_config.name}' declares unknown strategy in "
                         f"allowed_strategies: {strategy_name}"
                     )
+        _validate_guardrail_list(
+            agent_config.name, "input_guardrails", agent_config.input_guardrails, known_guardrails
+        )
+        _validate_guardrail_list(
+            agent_config.name,
+            "tool_output_guardrails",
+            agent_config.tool_output_guardrails,
+            known_guardrails,
+        )
+        _validate_guardrail_list(
+            agent_config.name,
+            "output_guardrails",
+            agent_config.output_guardrails,
+            known_guardrails,
+        )
 
     return (
         llm_registry,
         agent_registry,
         tool_registry,
         strategy_registry,
+        guardrail_registry,
+        session_store,
         config.base_prompt,
         config.compaction,
         config.logging,

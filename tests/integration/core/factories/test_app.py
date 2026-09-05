@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -7,6 +7,21 @@ from agent.core.exceptions import ConfigError
 from agent.core.factories.app import build_registries
 from agent.core.models.config import AppConfig
 from agent.core.models.message import Message
+from agent.core.session_stores.in_memory import InMemorySessionStore
+
+
+def _mock_validator_cls() -> MagicMock:
+    validator_cls = MagicMock()
+    validator_cls.return_value = MagicMock()
+    return validator_cls
+
+
+class _LLMCallableValidator:
+    """Stand-in for a real litellm-based Hub validator, exposing `llm_callable`."""
+
+    def __init__(self, llm_callable: str = "gpt-3.5-turbo", on_fail: object = None) -> None:
+        self.llm_callable = llm_callable
+        self.on_fail = on_fail
 
 
 def _agent(**overrides: object) -> dict[str, object]:
@@ -27,6 +42,8 @@ def test_build_given_valid_config_registers_llm():
         agent_registry,
         tool_registry,
         strategy_registry,
+        guardrail_registry,
+        _session_store,
         base_prompt,
         compaction_config,
         logging_config,
@@ -37,6 +54,7 @@ def test_build_given_valid_config_registers_llm():
     assert agent_registry is not None
     assert tool_registry is not None
     assert strategy_registry is not None
+    assert guardrail_registry is not None
     assert base_prompt is None
     assert compaction_config is None
     assert logging_config.level == "INFO"
@@ -47,7 +65,7 @@ def test_build_given_base_prompt_returns_it():
         {"llms": [{"model": "openai/gpt-4o"}], "base_prompt": "House style."}
     )
 
-    _, _, _, _, base_prompt, _, _, _ = build_registries(config)
+    _, _, _, _, _, _, base_prompt, _, _, _ = build_registries(config)
 
     assert base_prompt == "House style."
 
@@ -70,7 +88,7 @@ def test_build_given_valid_agent_registers_agent():
         }
     )
 
-    _, agent_registry, _, _, _, _, _, _ = build_registries(config)
+    _, agent_registry, _, _, _, _, _, _, _, _ = build_registries(config)
 
     assert agent_registry.get("researcher").model == "openai/gpt-4o"
 
@@ -126,7 +144,7 @@ async def test_build_given_llm_sampling_defaults_wires_adapter_with_them(
     monkeypatch.setattr("litellm.acompletion", mock_acompletion)
     config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o", "temperature": 0.2}]})
 
-    llm_registry, _, _, _, _, _, _, _ = build_registries(config)
+    llm_registry, _, _, _, _, _, _, _, _, _ = build_registries(config)
     await llm_registry.get("openai/gpt-4o").complete([Message(role="user", content="hi")])
 
     _, kwargs = mock_acompletion.call_args
@@ -139,7 +157,7 @@ def test_build_given_context_window_wires_adapter_with_override(monkeypatch: pyt
         {"llms": [{"model": "openai/gpt-4o", "context_window": 32000}]}
     )
 
-    llm_registry, _, _, _, _, _, _, _ = build_registries(config)
+    llm_registry, _, _, _, _, _, _, _, _, _ = build_registries(config)
 
     assert llm_registry.get("openai/gpt-4o").max_input_tokens() == 32000
 
@@ -149,7 +167,7 @@ def test_build_given_valid_tool_registers_tool():
         {"llms": [{"model": "openai/gpt-4o"}], "tools": [{"name": "get_current_time"}]}
     )
 
-    _, _, tool_registry, _, _, _, _, _ = build_registries(config)
+    _, _, tool_registry, _, _, _, _, _, _, _ = build_registries(config)
 
     assert tool_registry.get("get_current_time") is not None
 
@@ -180,7 +198,7 @@ def test_build_given_valid_strategy_registers_strategy():
         {"llms": [{"model": "openai/gpt-4o"}], "strategies": [{"name": "react"}]}
     )
 
-    _, _, _, strategy_registry, _, _, _, _ = build_registries(config)
+    _, _, _, strategy_registry, _, _, _, _, _, _ = build_registries(config)
 
     assert strategy_registry.get("react") is not None
 
@@ -188,9 +206,46 @@ def test_build_given_valid_strategy_registers_strategy():
 def test_build_given_no_strategies_declared_registers_none():
     config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}]})
 
-    _, _, _, strategy_registry, _, _, _, _ = build_registries(config)
+    _, _, _, strategy_registry, _, _, _, _, _, _ = build_registries(config)
 
     assert strategy_registry.all() == {}
+
+
+def test_build_given_no_session_store_declared_builds_in_memory():
+    config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}]})
+
+    _, _, _, _, _, session_store, _, _, _, _ = build_registries(config)
+
+    assert isinstance(session_store, InMemorySessionStore)
+
+
+def test_build_given_explicit_in_memory_session_store_builds_it():
+    config = AppConfig.model_validate(
+        {"llms": [{"model": "openai/gpt-4o"}], "session_store": {"type": "in_memory"}}
+    )
+
+    _, _, _, _, _, session_store, _, _, _, _ = build_registries(config)
+
+    assert isinstance(session_store, InMemorySessionStore)
+
+
+def test_build_given_unknown_session_store_type_raises_config_error():
+    config = AppConfig.model_validate(
+        {"llms": [{"model": "openai/gpt-4o"}], "session_store": {"type": "does-not-exist"}}
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+def test_build_given_max_sessions_passes_it_to_session_store():
+    config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}], "max_sessions": 5})
+
+    _, _, _, _, _, session_store, _, _, _, max_sessions = build_registries(config)
+
+    assert isinstance(session_store, InMemorySessionStore)
+    assert session_store._max_sessions == 5  # verifying factory wiring
+    assert max_sessions == 5
 
 
 def test_build_given_duplicate_strategy_name_raises_config_error():
@@ -237,7 +292,7 @@ def test_build_given_agent_declared_tool_registers_agent():
         }
     )
 
-    _, agent_registry, _, _, _, _, _, _ = build_registries(config)
+    _, agent_registry, _, _, _, _, _, _, _, _ = build_registries(config)
 
     assert agent_registry.get("researcher").tools == ["get_current_time"]
 
@@ -273,7 +328,7 @@ def test_build_given_two_agents_share_a_tool_registers_both():
         }
     )
 
-    _, agent_registry, _, _, _, _, _, _ = build_registries(config)
+    _, agent_registry, _, _, _, _, _, _, _, _ = build_registries(config)
 
     assert agent_registry.get("researcher").tools == ["get_current_time"]
     assert agent_registry.get("scheduler").tools == ["get_current_time"]
@@ -282,7 +337,7 @@ def test_build_given_two_agents_share_a_tool_registers_both():
 def test_build_given_no_compaction_returns_none():
     config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}]})
 
-    _, _, _, _, _, compaction_config, _, _ = build_registries(config)
+    _, _, _, _, _, _, _, compaction_config, _, _ = build_registries(config)
 
     assert compaction_config is None
 
@@ -295,7 +350,7 @@ def test_build_given_compaction_with_declared_model_returns_it():
         }
     )
 
-    _, _, _, _, _, compaction_config, _, _ = build_registries(config)
+    _, _, _, _, _, _, _, compaction_config, _, _ = build_registries(config)
 
     assert compaction_config is not None
     assert compaction_config.model == "openai/gpt-4o"
@@ -337,7 +392,7 @@ async def test_build_given_llm_retry_and_timeout_settings_wires_adapter_with_the
         }
     )
 
-    llm_registry, _, _, _, _, _, _, _ = build_registries(config)
+    llm_registry, _, _, _, _, _, _, _, _, _ = build_registries(config)
     adapter = llm_registry.get("openai/gpt-4o")
     await adapter.complete([Message(role="user", content="hi")])
 
@@ -454,3 +509,312 @@ def test_build_given_agent_allowed_strategies_references_unknown_strategy_raises
 
     with pytest.raises(ConfigError):
         build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_valid_guardrail_registers_it(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "no-pii",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"regex": "^$"},
+                }
+            ],
+        }
+    )
+
+    _, _, _, _, guardrail_registry, _, _, _, _, _ = build_registries(config)
+
+    assert guardrail_registry.get("no-pii") is not None
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_duplicate_guardrail_name_raises_config_error(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "dup",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"regex": "^$"},
+                },
+                {
+                    "name": "dup",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"regex": "^$"},
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+def test_build_given_unresolvable_validator_id_raises_config_error(mock_resolve: MagicMock):
+    mock_resolve.side_effect = ValueError(
+        "validator package not installed: guardrails/does-not-exist"
+    )
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [{"name": "bad", "validator_id": "guardrails/does-not-exist"}],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+def test_build_given_guardrail_validator_construction_raises_type_error_raises_config_error(
+    mock_resolve: MagicMock,
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    mock_resolve.return_value.side_effect = TypeError(
+        "unexpected keyword argument 'not_a_real_param'"
+    )
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "bad-params",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"not_a_real_param": True},
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+def test_build_given_agent_unknown_guardrail_in_input_guardrails_raises_config_error():
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "strategies": [{"name": "react"}],
+            "agents": [_agent(input_guardrails=["does-not-exist"])],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_agent_duplicate_guardrail_in_input_guardrails_raises_config_error(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "strategies": [{"name": "react"}],
+            "guardrails": [
+                {"name": "no-pii", "validator_id": "guardrails/regex_match"},
+            ],
+            "agents": [_agent(input_guardrails=["no-pii", "no-pii"])],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_agent_declared_guardrail_registers_agent(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "strategies": [{"name": "react"}],
+            "guardrails": [
+                {
+                    "name": "no-pii",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"regex": "^$"},
+                }
+            ],
+            "agents": [_agent(output_guardrails=["no-pii"])],
+        }
+    )
+
+    _, agent_registry, _, _, _, _, _, _, _, _ = build_registries(config)
+
+    assert agent_registry.get("researcher").output_guardrails == ["no-pii"]
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_validator_declares_llm_callable_and_registered_model_redirects_it(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _LLMCallableValidator
+    mock_guard = MagicMock()
+    mock_guard_cls.return_value.use.return_value = mock_guard
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "judge",
+                    "validator_id": "guardrails/response_evaluator",
+                    "validator_params": {"llm_callable": "openai/gpt-4o"},
+                }
+            ],
+        }
+    )
+
+    build_registries(config)
+
+    used_validator = mock_guard_cls.return_value.use.call_args[0][0]
+    assert used_validator.llm_callable == "llmregistry/openai/gpt-4o"
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_one_guardrail_resolves_its_validator_only_once(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _LLMCallableValidator
+    mock_guard_cls.return_value.use.return_value = MagicMock()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "judge",
+                    "validator_id": "guardrails/response_evaluator",
+                    "validator_params": {"llm_callable": "openai/gpt-4o"},
+                }
+            ],
+        }
+    )
+
+    build_registries(config)
+
+    mock_resolve.assert_called_once_with("guardrails/response_evaluator")
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+def test_build_given_validator_declares_llm_callable_and_it_is_missing_raises_config_error(
+    mock_resolve: MagicMock,
+):
+    mock_resolve.return_value = _LLMCallableValidator
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [{"name": "judge", "validator_id": "guardrails/response_evaluator"}],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+def test_build_given_validator_declares_llm_callable_and_it_is_unregistered_raises_config_error(
+    mock_resolve: MagicMock,
+):
+    mock_resolve.return_value = _LLMCallableValidator
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "judge",
+                    "validator_id": "guardrails/response_evaluator",
+                    "validator_params": {"llm_callable": "not-a-registered-model"},
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ConfigError):
+        build_registries(config)
+
+
+@patch("agent.adapters.guardrails_ai.resolve_validator")
+@patch("agent.adapters.guardrails_ai.Guard")
+def test_build_given_validator_with_no_llm_callable_param_is_unaffected(
+    mock_guard_cls: MagicMock, mock_resolve: MagicMock
+):
+    mock_resolve.return_value = _mock_validator_cls()
+    config = AppConfig.model_validate(
+        {
+            "llms": [{"model": "openai/gpt-4o"}],
+            "guardrails": [
+                {
+                    "name": "no-pii",
+                    "validator_id": "guardrails/regex_match",
+                    "validator_params": {"regex": "^$"},
+                }
+            ],
+        }
+    )
+
+    _, _, _, _, guardrail_registry, _, _, _, _, _ = build_registries(config)
+
+    assert guardrail_registry.get("no-pii") is not None
+
+
+def test_build_given_guardrails_configured_registers_llm_registry_litellm_provider():
+    import litellm
+
+    from agent.adapters.llm_registry_provider import LLM_REGISTRY_PROVIDER
+
+    litellm.custom_provider_map = None
+    with (
+        patch("agent.adapters.guardrails_ai.resolve_validator") as mock_resolve,
+        patch("agent.adapters.guardrails_ai.Guard"),
+    ):
+        mock_resolve.return_value = _mock_validator_cls()
+        config = AppConfig.model_validate(
+            {
+                "llms": [{"model": "openai/gpt-4o"}],
+                "guardrails": [
+                    {
+                        "name": "no-pii",
+                        "validator_id": "guardrails/regex_match",
+                        "validator_params": {"regex": "^$"},
+                    }
+                ],
+            }
+        )
+
+        build_registries(config)
+
+    assert litellm.custom_provider_map is not None
+    providers = [entry["provider"] for entry in litellm.custom_provider_map]
+    assert LLM_REGISTRY_PROVIDER in providers
+
+
+def test_build_given_no_guardrails_configured_does_not_touch_litellm_custom_provider_map():
+    import litellm
+
+    litellm.custom_provider_map = None
+    config = AppConfig.model_validate({"llms": [{"model": "openai/gpt-4o"}]})
+
+    build_registries(config)
+
+    assert litellm.custom_provider_map is None

@@ -8,9 +8,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from agent.core.exceptions import GuardrailBlockedError
 from agent.core.models.message import Message, ToolCall
 from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage, sum_usage
+from agent.core.protocols.iguardrail import IGuardrail, run_guardrails
 from agent.core.protocols.illm import ILLM
 from agent.core.protocols.itool import ITool
 
@@ -143,7 +145,10 @@ def _skipped_call_message(call: ToolCall, max_tool_calls_per_round: int) -> Mess
 
 
 async def _execute_call(
-    tools: dict[str, ITool], call: ToolCall, max_tool_result_chars: int | None
+    tools: dict[str, ITool],
+    call: ToolCall,
+    max_tool_result_chars: int | None,
+    tool_output_guardrails: list[IGuardrail] | None,
 ) -> Message:
     """Run one tool call and return its result as a role="tool" message. Never raises.
 
@@ -152,6 +157,8 @@ async def _execute_call(
         call: The tool call to execute.
         max_tool_result_chars: Cap on the result content, in characters. `None` means
             uncapped.
+        tool_output_guardrails: Guardrails to check the tool's result against before it's
+            returned. None or empty means no check.
 
     Returns:
         A role="tool" result message.
@@ -187,6 +194,20 @@ async def _execute_call(
     start = time.monotonic()
     try:
         result = await tool.execute(**validated.model_dump())
+        if tool_output_guardrails:
+            try:
+                result = await run_guardrails(result, tool_output_guardrails)
+            except GuardrailBlockedError as exc:
+                duration_ms = (time.monotonic() - start) * 1000
+                logger.info(
+                    "tool '%s' result blocked by guardrail after %.1fms: %s",
+                    name,
+                    duration_ms,
+                    exc,
+                )
+                return _tool_result_message(
+                    call, _truncate(f"Error: tool result {exc}", max_tool_result_chars)
+                )
         duration_ms = (time.monotonic() - start) * 1000
         logger.info(
             "tool '%s' completed in %.1fms, result length %d", name, duration_ms, len(result)
@@ -216,6 +237,7 @@ class ReactStrategy:
         max_tool_result_chars: int | None = None,
         max_tool_calls_per_round: int | None = None,
         max_tool_results_total_chars: int | None = None,
+        tool_output_guardrails: list[IGuardrail] | None = None,
     ) -> Turn:
         """Run the ReAct loop and return the final Turn.
 
@@ -230,6 +252,8 @@ class ReactStrategy:
             max_tool_result_chars: Cap on a single tool result's length.
             max_tool_calls_per_round: Cap on tool calls executed per round.
             max_tool_results_total_chars: Cap on combined tool-result length for the run.
+            tool_output_guardrails: Guardrails checked against each tool result before it's
+                added to context.
 
         Returns:
             Turn: the run's aggregate result.
@@ -288,7 +312,10 @@ class ReactStrategy:
                 ]
                 tool_calls = tool_calls[:max_tool_calls_per_round]
             executed = await asyncio.gather(
-                *(_execute_call(tools, call, max_tool_result_chars) for call in tool_calls)
+                *(
+                    _execute_call(tools, call, max_tool_result_chars, tool_output_guardrails)
+                    for call in tool_calls
+                )
             )
             results, tool_results_total_chars = _apply_aggregate_budget(
                 [*executed, *skipped], tool_results_total_chars, max_tool_results_total_chars

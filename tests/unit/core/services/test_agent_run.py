@@ -4,8 +4,10 @@ import logging
 import pytest
 
 from agent.core.exceptions import (
+    AgentError,
     AgentNotFoundError,
     CompactionExhaustedError,
+    GuardrailBlockedError,
     InputTooLargeError,
     LLMContextWindowExceededError,
     LLMNotFoundError,
@@ -20,15 +22,18 @@ from agent.core.exceptions import (
 )
 from agent.core.models.completion import Completion
 from agent.core.models.config import AgentConfig, CompactionConfig
+from agent.core.models.guardrail import GuardrailFinding
 from agent.core.models.message import Message
 from agent.core.models.turn import Turn
 from agent.core.models.usage import Usage
+from agent.core.protocols.iguardrail import IGuardrail
 from agent.core.protocols.itool import ITool
 from agent.core.registries.agent import AgentRegistry
+from agent.core.registries.guardrail import GuardrailRegistry
 from agent.core.registries.llm import LLMRegistry
 from agent.core.registries.strategy import StrategyRegistry
 from agent.core.registries.tool import ToolRegistry
-from agent.core.run_context import current_run_context
+from agent.core.run_context import current_run_context, record_extra_usage
 from agent.core.services.agent_run import AgentRunService
 from agent.core.services.compaction import CompactionService
 from agent.core.services.context_tracker import ContextFootprintTracker
@@ -53,6 +58,7 @@ class _FakeStrategy:
         self.last_max_tool_result_chars: int | None = None
         self.last_max_tool_calls_per_round: int | None = None
         self.last_max_tool_results_total_chars: int | None = None
+        self.last_tool_output_guardrails: list[IGuardrail] | None = None
         self.call_messages: list[list[Message]] = []
         self.last_run_context: tuple[str, str | None] | None = None
 
@@ -68,6 +74,7 @@ class _FakeStrategy:
         max_tool_result_chars: int | None = None,
         max_tool_calls_per_round: int | None = None,
         max_tool_results_total_chars: int | None = None,
+        tool_output_guardrails: list[IGuardrail] | None = None,
     ) -> Turn:
         self.last_messages = messages
         self.last_llm = llm
@@ -79,6 +86,7 @@ class _FakeStrategy:
         self.last_max_tool_result_chars = max_tool_result_chars
         self.last_max_tool_calls_per_round = max_tool_calls_per_round
         self.last_max_tool_results_total_chars = max_tool_results_total_chars
+        self.last_tool_output_guardrails = tool_output_guardrails
         self.last_run_context = current_run_context()
         self.call_messages.append(messages)
         index = min(self._call_count, len(self._outcomes) - 1)
@@ -112,6 +120,34 @@ class _FakeCompactionService:
                 agent, session_id, [Message(role="user", content="summary")]
             )
         return self._compact_result
+
+
+class _FakeGuardrail:
+    """Returns a fixed finding for every check() call, recording what it was called with."""
+
+    def __init__(self, name: str, action: str, finding: GuardrailFinding) -> None:
+        self.name = name
+        self.action = action
+        self._finding = finding
+        self.checked_with: list[str] = []
+
+    async def check(self, content: str) -> GuardrailFinding:
+        self.checked_with.append(content)
+        return self._finding
+
+
+class _UsageRecordingGuardrail(_FakeGuardrail):
+    """A guardrail whose check() records extra usage, as a redirected validator's LLM call would."""
+
+    def __init__(
+        self, name: str, action: str, finding: GuardrailFinding, extra_usage: Usage
+    ) -> None:
+        super().__init__(name, action, finding)
+        self._extra_usage = extra_usage
+
+    async def check(self, content: str) -> GuardrailFinding:
+        record_extra_usage(self._extra_usage)
+        return await super().check(content)
 
 
 class _FakeCostTracker:
@@ -162,6 +198,7 @@ def _service(
     compaction_service: object | None = None,
     cost_tracker: object | None = None,
     context_tracker: object | None = None,
+    guardrail_registry: GuardrailRegistry | None = None,
 ) -> AgentRunService:
     llm_registry = LLMRegistry()
     llm_registry.register("openai/gpt-4o", llm)
@@ -179,6 +216,7 @@ def _service(
         compaction_service,
         cost_tracker=cost_tracker,
         context_tracker=context_tracker,
+        guardrail_registry=guardrail_registry,
     )
 
 
@@ -594,6 +632,29 @@ async def test_run_records_usage_and_context_footprint_in_cost_tracker():
     assert result is not None
     assert result.total_tokens == _turn().usage.total_tokens
     assert context_tracker.get("researcher", run.session_id) == 5
+
+
+async def test_run_given_input_guardrail_records_llm_usage_keeps_it_out_of_run_usage():
+    extra = Usage(prompt_tokens=10, completion_tokens=10, total_tokens=20, cost_usd=0.001)
+    guardrail = _UsageRecordingGuardrail(
+        "politeness-judge", "warn", GuardrailFinding(triggered=False), extra
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("politeness-judge", guardrail)
+    agent = _researcher_agent(input_guardrails=["politeness-judge"])
+    cost_tracker = CostTracker()
+    strategy = _FakeStrategy(_turn())
+    service = _service(
+        strategy, agent=agent, guardrail_registry=guardrail_registry, cost_tracker=cost_tracker
+    )
+
+    run = await service.run("hello", "researcher")
+
+    assert run.usage.total_tokens == _turn().usage.total_tokens
+    assert run.supporting_usage.total_tokens == extra.total_tokens
+    session_usage = cost_tracker.session_usage("researcher", run.session_id)
+    assert session_usage is not None
+    assert session_usage.total_tokens == _turn().usage.total_tokens + extra.total_tokens
 
 
 async def test_run_given_context_window_exceeded_compacts_and_retries_once():
@@ -1180,6 +1241,37 @@ async def test_run_given_slow_proactive_compaction_still_respects_max_request_se
         await service.run("hello", "researcher", session_id=session_id)
 
 
+class _SlowGuardrail:
+    name = "slow"
+    action = "warn"
+
+    async def check(self, content: str) -> GuardrailFinding:
+        await asyncio.sleep(10)
+        return GuardrailFinding(triggered=False)
+
+
+async def test_run_given_slow_input_guardrail_still_respects_max_request_seconds():
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("slow", _SlowGuardrail())
+    agent = _researcher_agent(input_guardrails=["slow"], max_request_seconds=0.05)
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    with pytest.raises(RequestTimeoutError):
+        await service.run("hello", "researcher")
+
+
+async def test_run_given_slow_output_guardrail_still_respects_max_request_seconds():
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("slow", _SlowGuardrail())
+    agent = _researcher_agent(output_guardrails=["slow"], max_request_seconds=0.05)
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    with pytest.raises(RequestTimeoutError):
+        await service.run("hello", "researcher")
+
+
 async def test_run_given_existing_session_sets_run_context_during_strategy_call():
     session_store = InMemorySessionStore()
     session_id = await session_store.create("researcher")
@@ -1217,3 +1309,121 @@ async def test_run_given_completed_call_clears_run_context():
     await service.run("hello", "researcher")
 
     assert current_run_context() is None
+
+
+async def test_run_given_input_guardrail_blocks_raises_guardrail_blocked_error():
+    guardrail = _FakeGuardrail(
+        "no-secrets", "block", GuardrailFinding(triggered=True, reason="looks like a secret")
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(input_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    with pytest.raises(GuardrailBlockedError):
+        await service.run("sk-abc123", "researcher")
+
+
+async def test_run_given_input_guardrail_redacts_passes_redacted_message_to_strategy():
+    guardrail = _FakeGuardrail(
+        "no-secrets",
+        "redact",
+        GuardrailFinding(triggered=True, reason="secret", redacted_content="[REDACTED]"),
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(input_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    await service.run("sk-abc123", "researcher")
+
+    assert strategy.last_messages is not None
+    assert strategy.last_messages[-1].content == "[REDACTED]"
+
+
+async def test_run_given_output_guardrail_blocks_raises_guardrail_blocked_error():
+    guardrail = _FakeGuardrail(
+        "no-secrets", "block", GuardrailFinding(triggered=True, reason="leaked a secret")
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(output_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    with pytest.raises(GuardrailBlockedError):
+        await service.run("hello", "researcher")
+
+
+async def test_run_given_output_guardrail_redacts_returns_redacted_response():
+    guardrail = _FakeGuardrail(
+        "no-secrets",
+        "redact",
+        GuardrailFinding(triggered=True, reason="secret", redacted_content="[REDACTED]"),
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(output_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    run = await service.run("hello", "researcher")
+
+    assert run.response.content == "[REDACTED]"
+
+
+async def test_run_given_output_guardrail_redacts_persists_redacted_content_not_original():
+    guardrail = _FakeGuardrail(
+        "no-secrets",
+        "redact",
+        GuardrailFinding(triggered=True, reason="secret", redacted_content="[REDACTED]"),
+    )
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(output_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn("my secret is 12345"))
+    session_store = InMemorySessionStore()
+    service = _service(
+        strategy,
+        agent=agent,
+        guardrail_registry=guardrail_registry,
+        session_store=session_store,
+    )
+
+    run = await service.run("hello", "researcher")
+
+    stored = await session_store.get("researcher", run.session_id)
+    assert stored[-1].content == "[REDACTED]"
+
+
+async def test_run_given_no_guardrail_registry_and_no_guardrails_configured_runs_normally():
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy)  # guardrail_registry defaults to None
+
+    run = await service.run("hello", "researcher")
+
+    assert run.response.content is not None
+
+
+async def test_run_given_guardrails_configured_but_no_registry_injected_raises_agent_error():
+    agent = _researcher_agent(input_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent)  # guardrail_registry defaults to None
+
+    with pytest.raises(AgentError):
+        await service.run("hello", "researcher")
+
+
+async def test_run_given_tool_output_guardrails_configured_passes_them_to_strategy():
+    guardrail = _FakeGuardrail("no-secrets", "block", GuardrailFinding(triggered=False))
+    guardrail_registry = GuardrailRegistry()
+    guardrail_registry.register("no-secrets", guardrail)
+    agent = _researcher_agent(tool_output_guardrails=["no-secrets"])
+    strategy = _FakeStrategy(_turn())
+    service = _service(strategy, agent=agent, guardrail_registry=guardrail_registry)
+
+    await service.run("hello", "researcher")
+
+    assert strategy.last_tool_output_guardrails == [guardrail]

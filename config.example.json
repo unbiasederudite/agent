@@ -24,6 +24,22 @@
       "name": "react"
     }
   ],
+  "guardrails": [
+    {
+      "name": "no-secrets",
+      "validator_id": "guardrails/secrets_present",
+      "validator_params": {},
+      "action": "redact"
+    },
+    {
+      "name": "unusual-prompt-check",
+      "validator_id": "guardrails/unusual_prompt",
+      "validator_params": {
+        "llm_callable": "anthropic/claude-3-5-haiku-20241022"
+      },
+      "action": "block"
+    }
+  ],
   "agents": [
     {
       "name": "researcher",
@@ -50,7 +66,16 @@
       "allowed_strategies": [
         "react"
       ],
-      "max_request_seconds": 120
+      "max_request_seconds": 120,
+      "input_guardrails": [
+        "unusual-prompt-check"
+      ],
+      "tool_output_guardrails": [
+        "no-secrets"
+      ],
+      "output_guardrails": [
+        "no-secrets"
+      ]
     }
   ],
   "base_prompt": "Always respond in plain, professional English.",
@@ -68,6 +93,9 @@
     "file": "logs/agent.log",
     "file_max_bytes": 10000000,
     "file_backup_count": 5
+  },
+  "session_store": {
+    "type": "in_memory"
   },
   "max_sessions": 1000
 }

@@ -25,6 +25,10 @@ class StrategyNotFoundError(AgentError):
     """Raised when a requested reasoning strategy name is not registered."""
 
 
+class GuardrailNotFoundError(AgentError):
+    """Raised when a requested guardrail name is not registered."""
+
+
 class SessionNotFoundError(AgentError):
     """Raised when a requested (agent, session_id) pair is not registered."""
 
@@ -75,3 +79,7 @@ class ModelNotAllowedError(AgentError):
 
 class StrategyNotAllowedError(AgentError):
     """Raised when a request names a strategy that is registered but not permitted for the agent."""
+
+
+class GuardrailBlockedError(AgentError):
+    """Raised when a block-action guardrail triggers on the input or final-output checkpoint."""

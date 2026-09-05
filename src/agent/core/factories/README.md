@@ -4,4 +4,4 @@ Construct registered instances from startup configuration. Wiring happens once p
 
 ## Contents
 
-- `app.py` — `build_registries()`, builds the LLM, agent, tool, and strategy registries plus process-wide config from an already-parsed `AppConfig`.
+- `app.py` — `build_registries()`, builds the LLM, agent, tool, strategy, and guardrail registries plus process-wide config from an already-parsed `AppConfig`.

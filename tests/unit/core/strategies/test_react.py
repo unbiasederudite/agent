@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from agent.core.models.completion import Completion
+from agent.core.models.guardrail import GuardrailFinding
 from agent.core.models.message import Message, ToolCall, ToolCallFunction
 from agent.core.models.usage import Usage
 from agent.core.protocols.itool import ITool
@@ -67,6 +68,18 @@ class _RaisingTool:
 
     async def execute(self, **kwargs: Any) -> str:
         raise RuntimeError("tool exploded")
+
+
+class _FakeGuardrail:
+    """Returns a fixed finding for every check() call."""
+
+    def __init__(self, name: str, action: str, finding: GuardrailFinding) -> None:
+        self.name = name
+        self.action = action
+        self._finding = finding
+
+    async def check(self, content: str) -> GuardrailFinding:
+        return self._finding
 
 
 class _ConcurrentTool:
@@ -1247,3 +1260,140 @@ async def test_run_given_validation_error_log_does_not_contain_pydantic_doc_url(
     await strategy.run([Message(role="user", content="go")], llm, tools, max_iterations=10)
 
     assert not any("errors.pydantic.dev" in r.message for r in caplog.records)
+
+
+async def test_run_given_tool_output_guardrail_blocks_returns_error_tool_result_not_raise():
+    guardrail = _FakeGuardrail(
+        "no-secrets", "block", GuardrailFinding(triggered=True, reason="leaked a key")
+    )
+    tool = _EchoTool()
+    llm = _FakeLLM(
+        [
+            Completion(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            function=ToolCallFunction(
+                                name="echo", arguments=json.dumps({"value": "sk-abc123"})
+                            ),
+                        )
+                    ],
+                ),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            ),
+            Completion(
+                message=Message(role="assistant", content="done"),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="stop",
+            ),
+        ]
+    )
+
+    turn = await ReactStrategy().run(
+        [Message(role="user", content="echo the secret")],
+        llm,
+        {"echo": tool},
+        max_iterations=5,
+        tool_output_guardrails=[guardrail],
+    )
+
+    tool_result_message = turn.messages[1]
+    assert tool_result_message.role == "tool"
+    assert tool_result_message.content is not None
+    assert "guardrail 'no-secrets' blocked this content" in tool_result_message.content
+
+
+async def test_run_given_tool_output_guardrail_blocks_truncates_error_to_max_tool_result_chars():
+    guardrail = _FakeGuardrail(
+        "no-secrets", "block", GuardrailFinding(triggered=True, reason="leaked a key")
+    )
+    tool = _EchoTool()
+    llm = _FakeLLM(
+        [
+            Completion(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            function=ToolCallFunction(
+                                name="echo", arguments=json.dumps({"value": "sk-abc123"})
+                            ),
+                        )
+                    ],
+                ),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            ),
+            Completion(
+                message=Message(role="assistant", content="done"),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="stop",
+            ),
+        ]
+    )
+
+    turn = await ReactStrategy().run(
+        [Message(role="user", content="echo the secret")],
+        llm,
+        {"echo": tool},
+        max_iterations=5,
+        max_tool_result_chars=10,
+        tool_output_guardrails=[guardrail],
+    )
+
+    tool_result_message = turn.messages[1]
+    content = tool_result_message.content
+    assert content is not None
+    assert content.startswith("Error: too")
+    assert "...[truncated," in content
+    untruncated_length = len(
+        "Error: tool result guardrail 'no-secrets' blocked this content: leaked a key"
+    )
+    assert len(content) < untruncated_length
+
+
+async def test_run_given_tool_output_guardrail_redacts_replaces_result_content():
+    guardrail = _FakeGuardrail(
+        "no-secrets",
+        "redact",
+        GuardrailFinding(triggered=True, reason="secret", redacted_content="[REDACTED]"),
+    )
+    tool = _EchoTool()
+    llm = _FakeLLM(
+        [
+            Completion(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            function=ToolCallFunction(
+                                name="echo", arguments=json.dumps({"value": "sk-abc123"})
+                            ),
+                        )
+                    ],
+                ),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            ),
+            Completion(
+                message=Message(role="assistant", content="done"),
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="stop",
+            ),
+        ]
+    )
+
+    turn = await ReactStrategy().run(
+        [Message(role="user", content="echo the secret")],
+        llm,
+        {"echo": tool},
+        max_iterations=5,
+        tool_output_guardrails=[guardrail],
+    )
+
+    assert turn.messages[1].content == "[REDACTED]"

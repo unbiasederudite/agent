@@ -41,12 +41,13 @@ Every error body is `{"detail": {"message": "...", "code": "...", "request_id": 
 | Status | `code` | Meaning |
 |---|---|---|
 | 403 | `tool_not_allowed` / `model_not_allowed` / `strategy_not_allowed` | Not permitted for this agent. |
-| 404 | `agent_not_found` / `model_not_found` / `strategy_not_found` / `session_not_found` / `tool_not_found` | Named resource not registered. |
+| 404 | `agent_not_found` / `model_not_found` / `strategy_not_found` / `session_not_found` / `tool_not_found` / `guardrail_not_found` | Named resource not registered. |
 | 404 / 405 | *(none)* | Unmatched route or method. |
 | 409 | `session_busy` | Session already in use by another request. |
 | 413 | `input_too_large` | `message` exceeds the agent's `max_input_chars`. |
 | 413 | `context_window_exceeded` | Overflowed the model's context window; compaction unavailable. |
 | 413 | `compaction_exhausted` | Overflowed the context window; compaction was tried and didn't help. |
+| 422 | `guardrail_blocked` | A block-action input or output guardrail triggered. |
 | 429 | *(none)* | Provider rate-limited the request. Carries a `Retry-After` header. |
 | 500 | *(none)* | Unhandled server error. Body includes `request_id`. |
 | 502 | *(none)* | Other LLM call failure. Body includes `request_id`. |

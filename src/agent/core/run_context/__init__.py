@@ -1,9 +1,11 @@
-"""Per-run correlation context: the (agent, session_id) pair a run executes under."""
+"""Per-run correlation context and supporting-LLM-call usage accumulator."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import NamedTuple
+
+from agent.core.models.usage import ZERO_USAGE, Usage, sum_usage
 
 
 class RunContext(NamedTuple):
@@ -14,6 +16,7 @@ class RunContext(NamedTuple):
 
 
 _run_context: ContextVar[RunContext | None] = ContextVar("run_context", default=None)
+_extra_usage: ContextVar[list[Usage] | None] = ContextVar("extra_usage", default=None)
 
 
 def current_run_context() -> RunContext | None:
@@ -33,11 +36,13 @@ def run_context(agent: str, session_id: str | None) -> Iterator[None]:
         agent: Agent the run executes under.
         session_id: Session the run executes under, or `None` for a new one.
     """
-    token = _run_context.set(RunContext(agent, session_id))
+    context_token = _run_context.set(RunContext(agent, session_id))
+    usage_token = _extra_usage.set([])
     try:
         yield
     finally:
-        _run_context.reset(token)
+        _run_context.reset(context_token)
+        _extra_usage.reset(usage_token)
 
 
 def update_session_id(session_id: str) -> None:
@@ -49,3 +54,29 @@ def update_session_id(session_id: str) -> None:
     current = _run_context.get()
     if current is not None:
         _run_context.set(RunContext(current.agent, session_id))
+
+
+def record_extra_usage(usage: Usage) -> None:
+    """Add a supporting LLM call's usage to the current run's accumulator.
+
+    Args:
+        usage: The supporting call's usage.
+    """
+    bucket = _extra_usage.get()
+    if bucket is not None:
+        bucket.append(usage)
+
+
+def collect_extra_usage() -> Usage:
+    """Sum every usage recorded via `record_extra_usage()` so far this run.
+
+    Returns:
+        Usage: the combined usage, or all-zero if none was recorded or no run is active.
+    """
+    bucket = _extra_usage.get()
+    if not bucket:
+        return ZERO_USAGE
+    total = ZERO_USAGE
+    for usage in bucket:
+        total = sum_usage(total, usage)
+    return total
